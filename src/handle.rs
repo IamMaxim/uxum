@@ -416,6 +416,8 @@ impl Handle {
 
     /// Immediately shutdown the server.
     ///
+    /// Calling this after the server tasks have already been consumed (e.g. after [`Self::wait`] returned) is a no-op that returns `Ok(())`.
+    ///
     /// # Errors
     ///
     /// Returns `Err` if one of server tasks finished with an error.
@@ -453,6 +455,10 @@ impl Handle {
     }
 
     /// Immediately abort execution of the server.
+    ///
+    /// Unlike [`Self::graceful_shutdown`] and [`Self::wait`], this does **not**
+    /// run lifecycle participant shutdown stages. Use it only when orderly
+    /// cleanup is impossible or undesirable.
     pub fn abort(&mut self) {
         self.notify.on_shutdown();
         let server_tasks = std::mem::take(&mut self.server_tasks);

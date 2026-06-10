@@ -71,6 +71,7 @@ async fn lifecycle_orchestration_order() {
         .start(vec![server], app.into_make_service())
         .await
         .expect("server start");
+    // Not load-bearing: event ordering is deterministic; this just gives the listener a beat before we drain.
     tokio::time::sleep(Duration::from_millis(100)).await;
     handle
         .graceful_shutdown(Some(Duration::from_millis(500)))
