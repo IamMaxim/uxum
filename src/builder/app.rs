@@ -262,6 +262,8 @@ impl<B: AppBehavior> AppBuilder<B> {
     ///
     /// Readiness requires all registered sources to be ready; liveness requires
     /// all of them to be alive.
+    ///
+    /// Takes an `Arc` because the same instance is typically shared with the component that drives it (e.g. a task manager registered as a lifecycle participant).
     pub fn with_health_source(
         &mut self,
         source: Arc<dyn crate::probes::HealthSource>,

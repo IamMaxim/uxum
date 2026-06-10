@@ -31,7 +31,7 @@ use crate::{
 /// Register implementations via `AppBuilder::with_health_source`. All registered
 /// sources are AND-ed together with the built-in maintenance flag (readiness) and
 /// runtime watchdog (liveness).
-pub trait HealthSource: Send + Sync + 'static {
+pub trait HealthSource: std::fmt::Debug + Send + Sync + 'static {
     /// Source name, used in logs.
     fn name(&self) -> &str;
 
@@ -206,13 +206,14 @@ pub struct ProbeStateInner<B> {
 
 impl<B> ProbeStateInner<B> {
     /// Aggregate readiness over the maintenance flag and all health sources.
-    pub fn is_ready(&self) -> bool {
+    pub(crate) fn is_ready(&self) -> bool {
+        // Relaxed: probes are polled independently; no cross-location ordering to protect.
         !self.in_maintenance.load(Ordering::Relaxed)
             && self.health_sources.iter().all(|src| src.is_ready())
     }
 
     /// Aggregate liveness over the watchdog and all health sources.
-    pub fn is_alive(&self) -> bool {
+    pub(crate) fn is_alive(&self) -> bool {
         self.watchdog.as_ref().map_or(true, Watchdog::is_alive)
             && self.health_sources.iter().all(|src| src.is_alive())
     }
@@ -260,6 +261,7 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug)]
     struct FakeSource {
         ready: AtomicBool,
         alive: AtomicBool,
