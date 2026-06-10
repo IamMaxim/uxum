@@ -21,6 +21,7 @@ mod http_client;
 #[cfg(feature = "kafka")]
 mod kafka;
 mod layers;
+mod lifecycle;
 mod logging;
 mod metrics;
 mod notify;
@@ -61,6 +62,7 @@ pub use self::{
         request_id::CURRENT_REQUEST_ID,
         timeout::{CURRENT_DEADLINE, HandlerTimeoutConfig, TimeoutError},
     },
+    lifecycle::{LifecycleContext, LifecycleError, LifecycleParticipant},
     logging::LoggingConfig,
     metrics::{
         AdditionalMetricLabels, MetricsBuilder, MetricsError, MetricsState, text_exporter::*,
