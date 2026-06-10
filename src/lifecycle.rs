@@ -54,6 +54,10 @@ impl LifecycleError {
 #[derive(Clone, Debug)]
 pub struct LifecycleContext {
     /// Root cancellation token of the service.
+    ///
+    /// Cancelled when the service is finally torn down. Deliberately NOT a child
+    /// of the shutdown trigger: requesting graceful shutdown must not cancel
+    /// running tasks outright, since they are stopped in an orchestrated order.
     root_token: CancellationToken,
     /// Trigger used to request service-wide graceful shutdown.
     shutdown_trigger: CancellationToken,
@@ -80,15 +84,15 @@ impl LifecycleContext {
 
     /// Set application name.
     #[must_use]
-    pub fn with_app_name(mut self, name: impl Into<String>) -> Self {
-        self.app_name = Some(name.into());
+    pub fn with_app_name(mut self, name: impl ToString) -> Self {
+        self.app_name = Some(name.to_string());
         self
     }
 
     /// Set application version.
     #[must_use]
-    pub fn with_app_version(mut self, version: impl Into<String>) -> Self {
-        self.app_version = Some(version.into());
+    pub fn with_app_version(mut self, version: impl ToString) -> Self {
+        self.app_version = Some(version.to_string());
         self
     }
 
@@ -140,24 +144,42 @@ pub trait LifecycleParticipant: Send + Sync + 'static {
     fn name(&self) -> &str;
 
     /// Called before the HTTP server starts listening.
-    async fn start_pre_listen(&self, ctx: &LifecycleContext) -> Result<(), LifecycleError> {
-        let _ = ctx;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::Start`] if this participant fails to start.
+    /// Startup is aborted and already-started participants are unwound.
+    async fn start_pre_listen(&self, _ctx: &LifecycleContext) -> Result<(), LifecycleError> {
         Ok(())
     }
 
     /// Called after the HTTP server is accepting connections.
-    async fn start_post_listen(&self, ctx: &LifecycleContext) -> Result<(), LifecycleError> {
-        let _ = ctx;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::Start`] if this participant fails to start.
+    /// Startup is aborted and already-started participants are unwound.
+    async fn start_post_listen(&self, _ctx: &LifecycleContext) -> Result<(), LifecycleError> {
         Ok(())
     }
 
     /// Called when shutdown begins, before the HTTP server graceful drain.
-    async fn shutdown_pre_drain(&self) -> Result<(), LifecycleError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::Shutdown`] if this participant fails to shut down
+    /// cleanly. The orchestrator logs such errors and continues the sequence.
+    async fn shutdown_pre_drain(&self, _ctx: &LifecycleContext) -> Result<(), LifecycleError> {
         Ok(())
     }
 
     /// Called after the HTTP server finished draining, before telemetry flush.
-    async fn shutdown_post_drain(&self) -> Result<(), LifecycleError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::Shutdown`] if this participant fails to shut down
+    /// cleanly. The orchestrator logs such errors and continues the sequence.
+    async fn shutdown_post_drain(&self, _ctx: &LifecycleContext) -> Result<(), LifecycleError> {
         Ok(())
     }
 }
@@ -181,8 +203,8 @@ mod tests {
         let ctx = LifecycleContext::new(CancellationToken::new(), CancellationToken::new());
         assert!(p.start_pre_listen(&ctx).await.is_ok());
         assert!(p.start_post_listen(&ctx).await.is_ok());
-        assert!(p.shutdown_pre_drain().await.is_ok());
-        assert!(p.shutdown_post_drain().await.is_ok());
+        assert!(p.shutdown_pre_drain(&ctx).await.is_ok());
+        assert!(p.shutdown_post_drain(&ctx).await.is_ok());
     }
 
     #[test]
