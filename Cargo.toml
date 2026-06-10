@@ -121,6 +121,7 @@ retry-policies = "0.5.2"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 rstest = "0.26"
+tokio = { version = "1.44", features = ["full", "test-util", "macros"] }
 
 [features]
 default = ["hash_argon2"]

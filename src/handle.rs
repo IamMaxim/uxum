@@ -1,6 +1,6 @@
 //! Handle object to start, stop and control the service.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum_server::{Handle as AxumHandle, service::MakeService};
 use futures::{StreamExt, TryFutureExt, stream::FuturesUnordered};
@@ -22,6 +22,7 @@ use crate::{
     config::AppConfig,
     crypto::ensure_default_crypto_provider,
     errors::IoError,
+    lifecycle::{LifecycleContext, LifecycleParticipant},
     metrics::{MetricsState, gather_runtime_metrics},
     notify::ServiceNotifier,
     signal::{SignalError, SignalStream},
@@ -68,6 +69,9 @@ pub enum HandleError {
     /// Custom error from application initialization.
     #[error("Custom error: {0}")]
     Custom(Box<dyn std::error::Error + Send + Sync>),
+    /// Error from a lifecycle participant.
+    #[error(transparent)]
+    Lifecycle(#[from] crate::lifecycle::LifecycleError),
 }
 
 impl HandleError {
@@ -81,6 +85,15 @@ impl HandleError {
     }
 }
 
+/// Shutdown stage relative to the HTTP server drain.
+#[derive(Clone, Copy, Debug)]
+enum ShutdownStage {
+    /// Before the server stops accepting / drains in-flight requests.
+    PreDrain,
+    /// After the server has fully drained.
+    PostDrain,
+}
+
 /// Handle for starting and controlling the server.
 ///
 /// Unwritten logs will be flushed when dropping this object. This might help even in case of a
@@ -90,6 +103,14 @@ impl HandleError {
 pub struct Handle {
     /// Cancellation token for auxillary tasks.
     token: CancellationToken,
+    /// Token used to request orchestrated graceful shutdown.
+    shutdown_trigger: CancellationToken,
+    /// Registered lifecycle participants.
+    participants: Vec<Arc<dyn LifecycleParticipant>>,
+    /// Application name, passed to lifecycle participants.
+    app_name: Option<String>,
+    /// Application version, passed to lifecycle participants.
+    app_version: Option<String>,
     /// Guards for [`tracing_appender::non_blocking::NonBlocking`].
     buf_guards: Vec<WorkerGuard>,
     /// Tracing pipeline.
@@ -116,6 +137,7 @@ pub struct Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
+        self.shutdown_trigger.cancel();
         self.token.cancel();
         if let Some(provider) = self.metrics_provider.take() {
             if let Err(err) = provider.force_flush() {
@@ -137,7 +159,118 @@ impl Drop for Handle {
 }
 
 impl Handle {
+    /// Register a lifecycle participant.
+    ///
+    /// Must be called before [`Self::start`] or [`Self::run`]. Participants start
+    /// in registration order and shut down in reverse registration order.
+    pub fn register(&mut self, participant: Arc<dyn LifecycleParticipant>) -> &mut Self {
+        self.participants.push(participant);
+        self
+    }
+
+    /// Token that, when cancelled, initiates orchestrated graceful shutdown.
+    #[must_use]
+    pub fn shutdown_trigger(&self) -> CancellationToken {
+        self.shutdown_trigger.clone()
+    }
+
+    /// Create the context passed to lifecycle participants.
+    fn lifecycle_context(&self) -> LifecycleContext {
+        let mut ctx = LifecycleContext::new(self.token.clone(), self.shutdown_trigger.clone());
+        if let Some(name) = &self.app_name {
+            ctx = ctx.with_app_name(name);
+        }
+        if let Some(version) = &self.app_version {
+            ctx = ctx.with_app_version(version);
+        }
+        ctx
+    }
+
+    /// Spawn a task converting shutdown signals into a shutdown request.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if a signal handler fails to register.
+    fn spawn_signal_handler(&self) -> Result<JoinHandle<()>, HandleError> {
+        let span = debug_span!("signal_handler");
+        let mut sig = SignalStream::new()?;
+        let trigger = self.shutdown_trigger.clone();
+        Ok(tokio::spawn(
+            async move {
+                loop {
+                    tokio::select! {
+                        () = trigger.cancelled() => break,
+                        next = sig.next() => match next {
+                            Ok(sig) if sig.is_shutdown() => {
+                                info!("received {}, initiating graceful shutdown", sig.name());
+                                trigger.cancel();
+                                break;
+                            }
+                            Ok(sig) => {
+                                debug!("don't know what to do with signal {}, ignoring", sig.name());
+                            }
+                            Err(err) => {
+                                error!("error in signal handler: {err}");
+                            }
+                        }
+                    }
+                }
+            }
+            .instrument(span),
+        ))
+    }
+
+    /// Run one shutdown stage over all participants, in reverse registration order.
+    ///
+    /// Errors are logged and do not interrupt the sequence.
+    async fn run_shutdown_stage(&self, stage: ShutdownStage) {
+        let ctx = self.lifecycle_context();
+        for participant in self.participants.iter().rev() {
+            debug!(
+                participant = participant.name(),
+                "shutting down ({stage:?})"
+            );
+            let res = match stage {
+                ShutdownStage::PreDrain => participant.shutdown_pre_drain(&ctx).await,
+                ShutdownStage::PostDrain => participant.shutdown_post_drain(&ctx).await,
+            };
+            if let Err(err) = res {
+                error!(
+                    participant = participant.name(),
+                    "error during shutdown ({stage:?}): {err}"
+                );
+            }
+        }
+    }
+
+    /// Best-effort unwind of partially started participants (both stages, reverse order).
+    async fn unwind_participants(
+        participants: &[Arc<dyn LifecycleParticipant>],
+        ctx: &LifecycleContext,
+    ) {
+        for participant in participants.iter().rev() {
+            if let Err(err) = participant.shutdown_pre_drain(ctx).await {
+                error!(
+                    participant = participant.name(),
+                    "error during unwind: {err}"
+                );
+            }
+        }
+        for participant in participants.iter().rev() {
+            if let Err(err) = participant.shutdown_post_drain(ctx).await {
+                error!(
+                    participant = participant.name(),
+                    "error during unwind: {err}"
+                );
+            }
+        }
+    }
+
     /// Set up background service tasks.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if signal handler registration fails.
     fn prepare(&mut self) -> Result<(), HandleError> {
         if self.signal_handler.is_none() {
             let signal_handler = match self.spawn_signal_handler() {
@@ -155,41 +288,11 @@ impl Handle {
         Ok(())
     }
 
-    /// Launch a task that captures common UNIX signals.
-    ///
-    /// This will gracefully shut down all servers if signal type is appropriate.
+    /// Start axum server tasks.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if some signal handler failed to register.
-    fn spawn_signal_handler(&self) -> Result<JoinHandle<()>, HandleError> {
-        let span = debug_span!("signal_handler");
-        let mut sig = SignalStream::new()?;
-        let handle = self.handle.clone();
-        Ok(tokio::spawn(
-            async move {
-                loop {
-                    match sig.next().await {
-                        Ok(sig) if sig.is_shutdown() => {
-                            info!("received {}, shutting down server", sig.name());
-                            // FIXME: configure duration.
-                            handle.graceful_shutdown(Some(Duration::from_secs(5)));
-                            break;
-                        }
-                        Ok(sig) => {
-                            debug!("don't know what to do with signal {}, ignoring", sig.name());
-                        }
-                        Err(err) => {
-                            error!("error in signal handler: {err}");
-                        }
-                    }
-                }
-            }
-            .instrument(span),
-        ))
-    }
-
-    /// Start axum server tasks.
+    /// Returns `Err` if a server fails to bind or start.
     async fn start_servers<A>(
         &mut self,
         servers: Vec<ServerBuilder>,
@@ -260,11 +363,18 @@ impl Handle {
         Ok(())
     }
 
-    /// Start the server in the background.
+    /// Start the server in the background, running lifecycle participants around the listen point.
+    ///
+    /// Participants are started in registration order before the server begins listening
+    /// (`start_pre_listen`), and again after it is accepting connections (`start_post_listen`).
+    /// On failure, already-started participants are unwound via both shutdown stages.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if caught an error when initializing server tasks.
+    /// Returns `Err` if:
+    /// * Signal handler registration fails.
+    /// * A lifecycle participant fails to start.
+    /// * Server tasks fail to initialize.
     pub async fn start<A>(&mut self, servers: Vec<ServerBuilder>, app: A) -> Result<(), HandleError>
     where
         A: MakeService<SocketAddr, http::Request<hyper::body::Incoming>>
@@ -276,7 +386,30 @@ impl Handle {
         A::MakeFuture: Send,
     {
         self.prepare()?;
-        self.start_servers(servers, app).await?;
+        let ctx = self.lifecycle_context();
+        let mut started = 0_usize;
+        for participant in &self.participants {
+            debug!(participant = participant.name(), "starting (pre-listen)");
+            if let Err(err) = participant.start_pre_listen(&ctx).await {
+                error!(participant = participant.name(), "failed to start: {err}");
+                Self::unwind_participants(&self.participants[..started], &ctx).await;
+                return Err(err.into());
+            }
+            started += 1;
+        }
+        if let Err(err) = self.start_servers(servers, app).await {
+            Self::unwind_participants(&self.participants[..started], &ctx).await;
+            return Err(err);
+        }
+        for participant in &self.participants {
+            debug!(participant = participant.name(), "starting (post-listen)");
+            if let Err(err) = participant.start_post_listen(&ctx).await {
+                error!(participant = participant.name(), "failed to start: {err}");
+                self.abort();
+                Self::unwind_participants(&self.participants, &ctx).await;
+                return Err(err.into());
+            }
+        }
         self.notify.on_ready();
         Ok(())
     }
@@ -287,16 +420,26 @@ impl Handle {
     ///
     /// Returns `Err` if one of server tasks finished with an error.
     pub async fn shutdown(&mut self) -> Result<(), HandleError> {
+        self.shutdown_trigger.cancel();
         self.notify.on_shutdown();
+        self.run_shutdown_stage(ShutdownStage::PreDrain).await;
         self.handle.shutdown();
+        let mut result: Result<(), HandleError> = Ok(());
         let server_tasks = std::mem::take(&mut self.server_tasks);
         for res in futures::future::join_all(server_tasks).await {
-            res??;
+            let task_result = res.map_err(HandleError::from).and_then(|inner| inner);
+            if result.is_ok() {
+                result = task_result;
+            }
         }
-        Ok(())
+        self.run_shutdown_stage(ShutdownStage::PostDrain).await;
+        result
     }
 
     /// Gracefully shutdown the server, waiting for in-progress requests to finish.
+    ///
+    /// Triggers orchestrated shutdown: pre-drain lifecycle hooks run, then the HTTP
+    /// server drains, then post-drain lifecycle hooks run.
     ///
     /// # Errors
     ///
@@ -305,13 +448,8 @@ impl Handle {
         &mut self,
         graceful: Option<Duration>,
     ) -> Result<(), HandleError> {
-        self.notify.on_shutdown();
-        self.handle.graceful_shutdown(graceful);
-        let server_tasks = std::mem::take(&mut self.server_tasks);
-        for res in futures::future::join_all(server_tasks).await {
-            res??;
-        }
-        Ok(())
+        self.shutdown_trigger.cancel();
+        self.wait(graceful).await
     }
 
     /// Immediately abort execution of the server.
@@ -323,14 +461,14 @@ impl Handle {
         }
     }
 
-    /// Start the server and block execution until one of the server tasks exits.
-    ///
-    /// Will gracefully shutdown remaining server tasks.
+    /// Start the server and block execution until one of the server tasks exits or shutdown is
+    /// requested. Runs all lifecycle shutdown stages around the HTTP server drain.
     ///
     /// # Errors
     ///
     /// Returns `Err` if:
-    /// * Caught an error when initializing server tasks.
+    /// * Signal handler registration fails.
+    /// * A lifecycle participant fails to start.
     /// * One of server tasks finished with an error.
     pub async fn run<A>(
         &mut self,
@@ -351,9 +489,8 @@ impl Handle {
         self.wait(graceful).await
     }
 
-    /// Block execution until one of the server tasks exits.
-    ///
-    /// Will gracefully shutdown remaining server tasks.
+    /// Block execution until shutdown is requested or a server task exits, then run the
+    /// orchestrated shutdown sequence (pre-drain hooks → HTTP drain → post-drain hooks).
     ///
     /// # Errors
     ///
@@ -364,19 +501,29 @@ impl Handle {
         }
         let server_tasks = std::mem::take(&mut self.server_tasks);
         let mut tasks: FuturesUnordered<_> = server_tasks.into_iter().collect();
-        match tasks.next().await {
-            // Gracefully shutdown other tasks and return result of the one which exited
-            // first.
-            Some(ret) => {
-                self.handle.graceful_shutdown(graceful);
-                while let Some(other_ret) = tasks.next().await {
-                    let _ = other_ret?;
+        let mut result: Result<(), HandleError> = Ok(());
+        tokio::select! {
+            () = self.shutdown_trigger.cancelled() => {}
+            res = tasks.next() => {
+                // A server task exited on its own; record its result and shut
+                // everything else down.
+                if let Some(res) = res {
+                    result = res.map_err(HandleError::from).and_then(|inner| inner);
                 }
-                ret?
+                self.shutdown_trigger.cancel();
             }
-            // This should not happen normally.
-            None => Ok(()),
         }
+        self.notify.on_shutdown();
+        self.run_shutdown_stage(ShutdownStage::PreDrain).await;
+        self.handle.graceful_shutdown(graceful);
+        while let Some(res) = tasks.next().await {
+            let task_result = res.map_err(HandleError::from).and_then(|inner| inner);
+            if result.is_ok() {
+                result = task_result;
+            }
+        }
+        self.run_shutdown_stage(ShutdownStage::PostDrain).await;
+        result
     }
 
     /// Send custom status update notification to process supervisor.
@@ -443,6 +590,10 @@ impl AppConfig {
         let notify = ServiceNotifier::new();
         Ok(Handle {
             token,
+            shutdown_trigger: CancellationToken::new(),
+            participants: Vec::new(),
+            app_name: self.app_name.clone(),
+            app_version: self.app_version.clone(),
             buf_guards,
             tracer,
             tracer_provider,
