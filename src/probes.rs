@@ -26,6 +26,26 @@ use crate::{
     watchdog::{Watchdog, WatchdogConfig},
 };
 
+/// Pluggable health source feeding service probes.
+///
+/// Register implementations via `AppBuilder::with_health_source`. All registered
+/// sources are AND-ed together with the built-in maintenance flag (readiness) and
+/// runtime watchdog (liveness).
+pub trait HealthSource: Send + Sync + 'static {
+    /// Source name, used in logs.
+    fn name(&self) -> &str;
+
+    /// Whether the component is ready to serve traffic (readiness probe).
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    /// Whether the component is functioning at all (liveness probe).
+    fn is_alive(&self) -> bool {
+        true
+    }
+}
+
 /// Configuration for service probes and management mode API.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -97,10 +117,16 @@ impl ProbeConfig {
         behavior: B,
         auth_provider: Box<dyn AuthProvider>,
         auth_extractor: Box<dyn AuthExtractor>,
+        health_sources: Vec<Arc<dyn HealthSource>>,
     ) -> Router {
         // TODO: add toggle for probes, and possibly for maintenance mode.
         let _span = debug_span!("build_probes").entered();
-        let state = ProbeState::new(behavior, self.start_in_maintenance, self.watchdog.as_ref());
+        let state = ProbeState::new(
+            behavior,
+            self.start_in_maintenance,
+            self.watchdog.as_ref(),
+            health_sources,
+        );
         Router::new()
             .route(&self.readiness_path, routing::get(readiness_probe))
             .route(&self.liveness_path, routing::get(liveness_probe))
@@ -140,14 +166,20 @@ impl Default for ProbeState<StandardAppBehavior> {
             behavior: StandardAppBehavior,
             in_maintenance: AtomicBool::new(true),
             watchdog: None,
+            health_sources: Vec::new(),
         }))
     }
 }
 
 impl<B> ProbeState<B> {
-    /// Create new [`ProbeState`] with optional [`WatchdogConfig`].
+    /// Create new [`ProbeState`] with optional [`WatchdogConfig`] and external health sources.
     #[must_use]
-    pub fn new(behavior: B, in_maint: bool, watchdog: Option<&WatchdogConfig>) -> Self {
+    pub fn new(
+        behavior: B,
+        in_maint: bool,
+        watchdog: Option<&WatchdogConfig>,
+        health_sources: Vec<Arc<dyn HealthSource>>,
+    ) -> Self {
         Self(Arc::new(ProbeStateInner {
             behavior,
             in_maintenance: AtomicBool::new(in_maint),
@@ -156,6 +188,7 @@ impl<B> ProbeState<B> {
                 watchdog.start();
                 watchdog
             }),
+            health_sources,
         }))
     }
 }
@@ -167,15 +200,31 @@ pub struct ProbeStateInner<B> {
     in_maintenance: AtomicBool,
     /// Optional runtime watchdog for use in liveness probes.
     watchdog: Option<Watchdog>,
+    /// External health sources aggregated into probe responses.
+    health_sources: Vec<Arc<dyn HealthSource>>,
+}
+
+impl<B> ProbeStateInner<B> {
+    /// Aggregate readiness over the maintenance flag and all health sources.
+    pub fn is_ready(&self) -> bool {
+        !self.in_maintenance.load(Ordering::Relaxed)
+            && self.health_sources.iter().all(|src| src.is_ready())
+    }
+
+    /// Aggregate liveness over the watchdog and all health sources.
+    pub fn is_alive(&self) -> bool {
+        self.watchdog.as_ref().map_or(true, Watchdog::is_alive)
+            && self.health_sources.iter().all(|src| src.is_alive())
+    }
 }
 
 /// Readiness probe handler.
 ///
 /// For use in k8s-like deployments.
 async fn readiness_probe<B: AppBehavior>(state: State<ProbeState<B>>) -> Response {
-    match state.in_maintenance.load(Ordering::Relaxed) {
-        true => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-        false => state.behavior.readiness_probe().await.into_response(),
+    match state.is_ready() {
+        true => state.behavior.readiness_probe().await.into_response(),
+        false => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
 
@@ -183,12 +232,9 @@ async fn readiness_probe<B: AppBehavior>(state: State<ProbeState<B>>) -> Respons
 ///
 /// For use in k8s-like deployments.
 async fn liveness_probe<B: AppBehavior>(state: State<ProbeState<B>>) -> Response {
-    match &state.watchdog {
-        Some(watchdog) => match watchdog.is_alive() {
-            true => state.behavior.liveness_probe().await.into_response(),
-            false => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-        },
-        None => state.behavior.liveness_probe().await.into_response(),
+    match state.is_alive() {
+        true => state.behavior.liveness_probe().await.into_response(),
+        false => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
 
@@ -206,4 +252,82 @@ async fn maintenance_off<B>(state: State<ProbeState<B>>) -> impl IntoResponse {
         info!("maintenance mode disabled");
     }
     StatusCode::OK
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    struct FakeSource {
+        ready: AtomicBool,
+        alive: AtomicBool,
+    }
+
+    impl FakeSource {
+        fn new(ready: bool, alive: bool) -> Arc<Self> {
+            Arc::new(Self {
+                ready: AtomicBool::new(ready),
+                alive: AtomicBool::new(alive),
+            })
+        }
+    }
+
+    impl HealthSource for FakeSource {
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn is_ready(&self) -> bool {
+            self.ready.load(Ordering::Relaxed)
+        }
+        fn is_alive(&self) -> bool {
+            self.alive.load(Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn readiness_aggregates_sources_and_maintenance() {
+        let src = FakeSource::new(true, true);
+        let state = ProbeState::new(
+            StandardAppBehavior,
+            false,
+            None,
+            vec![src.clone() as Arc<dyn HealthSource>],
+        );
+        assert!(state.is_ready());
+        src.ready.store(false, Ordering::Relaxed);
+        assert!(!state.is_ready());
+        // Maintenance overrides even ready sources.
+        src.ready.store(true, Ordering::Relaxed);
+        let state = ProbeState::new(
+            StandardAppBehavior,
+            true,
+            None,
+            vec![src as Arc<dyn HealthSource>],
+        );
+        assert!(!state.is_ready());
+    }
+
+    #[test]
+    fn liveness_aggregates_sources() {
+        let src = FakeSource::new(true, true);
+        // No watchdog: liveness depends only on sources.
+        let state = ProbeState::new(
+            StandardAppBehavior,
+            false,
+            None,
+            vec![src.clone() as Arc<dyn HealthSource>],
+        );
+        assert!(state.is_alive());
+        src.alive.store(false, Ordering::Relaxed);
+        assert!(!state.is_alive());
+    }
+
+    #[test]
+    fn no_sources_preserves_old_behavior() {
+        let state = ProbeState::new(StandardAppBehavior, false, None, Vec::new());
+        assert!(state.is_ready());
+        assert!(state.is_alive());
+    }
 }

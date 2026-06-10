@@ -4,6 +4,7 @@ use std::{
     any::Any,
     collections::{BTreeMap, HashSet},
     convert::Infallible,
+    sync::Arc,
 };
 
 use axum::{
@@ -88,7 +89,6 @@ pub enum AppBuilderError {
 }
 
 /// Builder for application routes.
-#[derive(Debug)]
 #[non_exhaustive]
 pub struct AppBuilder<B> {
     /// Customizable application behaviors.
@@ -103,9 +103,26 @@ pub struct AppBuilder<B> {
     config: AppConfig,
     /// Metrics container object.
     metrics: Option<MetricsState>,
+    /// External health sources to aggregate into service probes.
+    health_sources: Vec<Arc<dyn crate::probes::HealthSource>>,
     /// Container of configured [`tonic`] GRPC services.
     #[cfg(feature = "grpc")]
     grpc_services: GrpcRoutesBuilder,
+}
+
+impl<B> std::fmt::Debug for AppBuilder<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppBuilder")
+            .field("auth_provider", &self.auth_provider)
+            .field("auth_extractor", &self.auth_extractor)
+            .field("config", &self.config)
+            .field("metrics", &self.metrics)
+            .field(
+                "health_sources",
+                &format!("[{} source(s)]", self.health_sources.len()),
+            )
+            .finish()
+    }
 }
 
 impl TryFrom<AppConfig> for AppBuilder<StandardAppBehavior> {
@@ -120,6 +137,7 @@ impl TryFrom<AppConfig> for AppBuilder<StandardAppBehavior> {
             auth_extractor,
             metrics: value.metrics_state.take(),
             config: value,
+            health_sources: Vec::new(),
             #[cfg(feature = "grpc")]
             grpc_services: GrpcRoutes::builder(),
         })
@@ -134,6 +152,7 @@ impl Default for AppBuilder<StandardAppBehavior> {
             auth_extractor: Box::new(NoOpAuthExtractor),
             config: AppConfig::default(),
             metrics: None,
+            health_sources: Vec::new(),
             #[cfg(feature = "grpc")]
             grpc_services: GrpcRoutes::builder(),
         }
@@ -176,6 +195,7 @@ impl<B: AppBehavior> AppBuilder<B> {
             auth_extractor: self.auth_extractor,
             config: self.config,
             metrics: self.metrics,
+            health_sources: self.health_sources,
             #[cfg(feature = "grpc")]
             grpc_services: self.grpc_services,
         }
@@ -235,6 +255,18 @@ impl<B: AppBehavior> AppBuilder<B> {
     {
         // TODO: maybe make state registry non-global? dubious.
         state::put(state);
+        self
+    }
+
+    /// Register an external health source aggregated into service probes.
+    ///
+    /// Readiness requires all registered sources to be ready; liveness requires
+    /// all of them to be alive.
+    pub fn with_health_source(
+        &mut self,
+        source: Arc<dyn crate::probes::HealthSource>,
+    ) -> &mut Self {
+        self.health_sources.push(source);
         self
     }
 
@@ -358,6 +390,7 @@ impl<B: AppBehavior> AppBuilder<B> {
             self.behavior.clone(),
             clone_box(self.auth_provider.as_ref()),
             clone_box(self.auth_extractor.as_ref()),
+            std::mem::take(&mut self.health_sources),
         ));
 
         // Add RapiDoc and/or OpenAPI specification generator if enabled.

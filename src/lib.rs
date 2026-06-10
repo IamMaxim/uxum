@@ -68,7 +68,7 @@ pub use self::{
         AdditionalMetricLabels, MetricsBuilder, MetricsError, MetricsState, text_exporter::*,
     },
     notify::ServiceNotifier,
-    probes::{ProbeConfig, ProbeState},
+    probes::{HealthSource, ProbeConfig, ProbeState},
     response::{GetResponseSchemas, ResponseSchema},
     runtime::{RuntimeConfig, RuntimeError},
     signal::{SignalError, SignalStream},
