@@ -416,7 +416,9 @@ impl Handle {
 
     /// Immediately shutdown the server.
     ///
-    /// Calling this after the server tasks have already been consumed (e.g. after [`Self::wait`] returned) is a no-op that returns `Ok(())`.
+    /// Calling this after the server tasks have already been consumed (e.g. after [`Self::wait`]
+    /// returned) re-runs only the participant shutdown stages (which must be idempotent) and
+    /// returns `Ok(())`.
     ///
     /// # Errors
     ///
