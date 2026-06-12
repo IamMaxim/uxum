@@ -105,6 +105,9 @@ pub struct AppBuilder<B> {
     metrics: Option<MetricsState>,
     /// External health sources to aggregate into service probes.
     health_sources: Vec<Arc<dyn crate::probes::HealthSource>>,
+    /// Router transforms applied inside the global layer stack (after
+    /// `RecordRequestIdLayer`), registered by `with_global_layer`.
+    global_layer_hooks: Vec<Box<dyn FnOnce(Router) -> Router + Send>>,
     /// Container of configured [`tonic`] GRPC services.
     #[cfg(feature = "grpc")]
     grpc_services: GrpcRoutesBuilder,
@@ -112,16 +115,16 @@ pub struct AppBuilder<B> {
 
 impl<B> std::fmt::Debug for AppBuilder<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AppBuilder")
-            .field("auth_provider", &self.auth_provider)
+        let mut dbg = f.debug_struct("AppBuilder");
+        dbg.field("auth_provider", &self.auth_provider)
             .field("auth_extractor", &self.auth_extractor)
             .field("config", &self.config)
             .field("metrics", &self.metrics)
-            .field(
-                "health_sources",
-                &format!("[{} source(s)]", self.health_sources.len()),
-            )
-            .finish()
+            .field("health_sources", &self.health_sources)
+            .field("global_layer_hooks", &self.global_layer_hooks.len());
+        #[cfg(feature = "grpc")]
+        dbg.field("grpc_services", &"..");
+        dbg.finish_non_exhaustive()
     }
 }
 
@@ -138,6 +141,7 @@ impl TryFrom<AppConfig> for AppBuilder<StandardAppBehavior> {
             metrics: value.metrics_state.take(),
             config: value,
             health_sources: Vec::new(),
+            global_layer_hooks: Vec::new(),
             #[cfg(feature = "grpc")]
             grpc_services: GrpcRoutes::builder(),
         })
@@ -153,6 +157,7 @@ impl Default for AppBuilder<StandardAppBehavior> {
             config: AppConfig::default(),
             metrics: None,
             health_sources: Vec::new(),
+            global_layer_hooks: Vec::new(),
             #[cfg(feature = "grpc")]
             grpc_services: GrpcRoutes::builder(),
         }
@@ -196,6 +201,7 @@ impl<B: AppBehavior> AppBuilder<B> {
             config: self.config,
             metrics: self.metrics,
             health_sources: self.health_sources,
+            global_layer_hooks: self.global_layer_hooks,
             #[cfg(feature = "grpc")]
             grpc_services: self.grpc_services,
         }
@@ -214,6 +220,21 @@ impl<B: AppBehavior> AppBuilder<B> {
     /// Normally you shouldn't use this method, relying instead on runtime configuration.
     pub fn with_auth_provider(&mut self, provider: impl AuthProvider) -> &mut Self {
         self.auth_provider = Box::new(provider);
+        self
+    }
+
+    /// Apply a transform to the application router inside the global middleware
+    /// stack. The resulting service runs *after* `RecordRequestIdLayer`, i.e.
+    /// within `CURRENT_REQUEST_ID` scope. Typical use:
+    /// `builder.with_global_layer(|r| r.layer(my_layer))`.
+    ///
+    /// Hooks are applied in registration order, innermost-first, before the
+    /// global request-id / panic-catch / header layers wrap the router.
+    pub fn with_global_layer(
+        &mut self,
+        f: impl FnOnce(Router) -> Router + Send + 'static,
+    ) -> &mut Self {
+        self.global_layer_hooks.push(Box::new(f));
         self
     }
 
@@ -412,6 +433,12 @@ impl<B: AppBehavior> AppBuilder<B> {
             rtr = rtr.merge(api_doc.build_router(auth)?);
         }
 
+        // Apply companion router transforms inside the global stack: they run
+        // after RecordRequestIdLayer (within CURRENT_REQUEST_ID scope) because
+        // wrap_global_layers wraps the already-transformed router.
+        for hook in std::mem::take(&mut self.global_layer_hooks) {
+            rtr = hook(rtr);
+        }
         // Wrap router in global layers.
         let final_rtr = self.wrap_global_layers(rtr, metrics_state);
         info!("finished building application");
