@@ -54,8 +54,22 @@ impl LoggingConfig {
     ///
     /// Returns `Err` if any of the subscribers cannot be initialized.
     pub fn make_registry(&self) -> Result<(LoggingRegistry, Vec<WorkerGuard>), LoggingError> {
+        self.make_registry_with(Vec::new())
+    }
+
+    /// Like [`make_registry`](Self::make_registry), but additionally composes
+    /// `extra` foreign layers (e.g. a companion crate's capture bridge) into
+    /// the registry alongside the configured subscribers, before `.init()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if any of the subscribers cannot be initialized.
+    pub fn make_registry_with(
+        &self,
+        extra: Vec<Box<dyn Layer<Registry> + Send + Sync>>,
+    ) -> Result<(LoggingRegistry, Vec<WorkerGuard>), LoggingError> {
         let num_subs = self.subscribers.len();
-        let (subs, buf_guards) = self.subscribers.iter().try_fold(
+        let (mut subs, buf_guards) = self.subscribers.iter().try_fold(
             (Vec::with_capacity(num_subs), Vec::with_capacity(num_subs)),
             |(mut acc_s, mut acc_g), sub_cfg| {
                 let (sub, guard) = sub_cfg.make_layer()?;
@@ -64,6 +78,7 @@ impl LoggingConfig {
                 Ok::<_, LoggingError>((acc_s, acc_g))
             },
         )?;
+        subs.extend(extra);
         Ok((Registry::default().with(subs), buf_guards))
     }
 }

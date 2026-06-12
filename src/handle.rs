@@ -560,7 +560,8 @@ impl AppConfig {
     /// error.
     pub async fn handle(&mut self) -> Result<Handle, HandleError> {
         let token = CancellationToken::new();
-        let (registry, buf_guards) = self.logging.make_registry()?;
+        let extra_layers = std::mem::take(&mut self.extra_subscriber_layers.0);
+        let (registry, buf_guards) = self.logging.make_registry_with(extra_layers)?;
         let otel_res = self.otel_resource();
         let (tracer, tracer_provider) = if let Some(tcfg) = self.tracing.as_mut() {
             let tracer_provider = tcfg.build_provider(otel_res.clone()).await?;

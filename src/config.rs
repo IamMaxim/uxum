@@ -194,6 +194,30 @@ pub struct AppConfig {
     /// Metrics state to pass into app builder.
     #[serde(skip)]
     pub metrics_state: Option<MetricsState>,
+    /// Foreign tracing-subscriber layers injected by companion crates,
+    /// composed into the registry at [`handle()`](AppConfig::handle).
+    #[serde(skip)]
+    pub extra_subscriber_layers: ExtraSubscriberLayers,
+}
+
+/// Holds injected subscriber layers. Trait objects aren't `Clone`/`Debug`;
+/// this wrapper supplies trivial impls so [`AppConfig`] keeps its derives.
+/// Cloning yields an empty set (layers are consumed once at `handle()`).
+#[derive(Default)]
+pub struct ExtraSubscriberLayers(
+    pub Vec<Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>>,
+);
+
+impl Clone for ExtraSubscriberLayers {
+    fn clone(&self) -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl std::fmt::Debug for ExtraSubscriberLayers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ExtraSubscriberLayers({} layers)", self.0.len())
+    }
 }
 
 impl AppConfig {
@@ -227,6 +251,18 @@ impl AppConfig {
     /// Set metrics state to pass into app builder on initialization.
     pub fn with_metrics_state(&mut self, metrics_state: MetricsState) -> &mut Self {
         self.metrics_state = Some(metrics_state);
+        self
+    }
+
+    /// Inject an additional tracing-subscriber layer into the registry built
+    /// at [`handle()`](AppConfig::handle), composed alongside the configured
+    /// subscribers before `.init()`. Useful for companion crates that observe
+    /// the span/event stream (e.g. `uxum-rlog`'s capture bridge).
+    pub fn with_subscriber_layer(
+        &mut self,
+        layer: impl tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.extra_subscriber_layers.0.push(Box::new(layer));
         self
     }
 }
