@@ -228,8 +228,10 @@ impl<B: AppBehavior> AppBuilder<B> {
     /// within `CURRENT_REQUEST_ID` scope. Typical use:
     /// `builder.with_global_layer(|r| r.layer(my_layer))`.
     ///
-    /// Hooks are applied in registration order, innermost-first, before the
-    /// global request-id / panic-catch / header layers wrap the router.
+    /// Hooks are applied in registration order, before the global request-id /
+    /// panic-catch / header layers wrap the router: the first-registered hook
+    /// becomes the innermost layer (closest to the handler), so on the request
+    /// path it runs last.
     pub fn with_global_layer(
         &mut self,
         f: impl FnOnce(Router) -> Router + Send + 'static,
