@@ -258,6 +258,9 @@ impl AppConfig {
     /// at [`handle()`](AppConfig::handle), composed alongside the configured
     /// subscribers before `.init()`. Useful for companion crates that observe
     /// the span/event stream (e.g. `uxum-rlog`'s capture bridge).
+    ///
+    /// Note: injected layers are consumed once at `handle()` and do not survive
+    /// a clone of the [`AppConfig`].
     pub fn with_subscriber_layer(
         &mut self,
         layer: impl tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync + 'static,
