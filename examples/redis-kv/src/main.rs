@@ -3,10 +3,10 @@
 
 use std::{net::SocketAddr, ops::Deref, sync::Arc, time::Duration};
 
-use bb8_redis::{bb8, redis::AsyncCommands, RedisConnectionManager};
+use bb8_redis::{RedisConnectionManager, bb8, redis::AsyncCommands};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use uxum::{prelude::*, GetResponseSchemas, ResponseSchema};
+use uxum::{GetResponseSchemas, ResponseSchema, prelude::*};
 use uxum_pools::r#async::InstrumentedPool;
 
 /// Command-line arguments.
@@ -125,14 +125,14 @@ impl IntoResponse for ApiError {
 
 impl GetResponseSchemas for ApiError {
     type ResponseIter = [ResponseSchema; 1];
-    fn get_response_schemas(gen: &mut schemars::gen::SchemaGenerator) -> Self::ResponseIter {
+    fn get_response_schemas(r#gen: &mut schemars::r#gen::SchemaGenerator) -> Self::ResponseIter {
         [ResponseSchema {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             response: openapi3::Response {
                 description: "Error response".into(),
                 content: okapi::map! {
                     mime::APPLICATION_JSON.to_string() => openapi3::MediaType {
-                        schema: Some(gen.subschema_for::<Self>().into_object()),
+                        schema: Some(r#gen.subschema_for::<Self>().into_object()),
                         ..Default::default()
                     },
                 },
@@ -199,7 +199,7 @@ async fn run(args: Args, mut config: ServiceConfig<LocalConfig>) -> Result<(), a
     let svc = app.into_make_service_with_connect_info::<SocketAddr>();
     // Start the service.
     handle
-        .run(config.server, svc, Some(Duration::from_secs(5)))
+        .run(config.servers, svc, Some(Duration::from_secs(5)))
         .await
         .map_err(Into::into)
 }
@@ -247,7 +247,7 @@ pub struct SetRequest {
     /// Key to write to storage.
     key: String,
     /// Value to write to storage.
-    value: Option<String>,
+    value: String,
 }
 
 /// Set value for specific key.

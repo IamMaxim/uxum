@@ -6,13 +6,13 @@ use std::{
     ops::{Deref, DerefMut},
     pin::Pin,
     sync::Arc,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
     time::Instant,
 };
 
 use opentelemetry::{Key, KeyValue};
 use pin_project::pin_project;
-use tracing::{debug_span, instrument::Instrumented, Instrument, Span};
+use tracing::{Instrument, Span, debug_span, instrument::Instrumented};
 
 use crate::metrics::Metrics;
 

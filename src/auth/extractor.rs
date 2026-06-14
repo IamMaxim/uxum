@@ -7,20 +7,22 @@ use std::{borrow::Cow, collections::BTreeMap, str::FromStr};
 use axum::{
     body::Body,
     http::{
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
         HeaderName, HeaderValue, Request, Response, StatusCode,
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
     },
     response::IntoResponse,
 };
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 #[cfg(feature = "jwt")]
 use deboog::Deboog;
-use dyn_clone::{clone_box, DynClone};
+use dyn_clone::{DynClone, clone_box};
 #[cfg(feature = "jwt")]
 use jsonwebtoken as jwt;
-use okapi::{openapi3, Map};
+use okapi::{Map, openapi3};
 #[cfg(feature = "jwt")]
 use serde_json::Value;
+#[cfg(feature = "spiffe")]
+use spiffe_rustls_tokio::PeerIdentity;
 use tracing::error;
 
 use crate::{
@@ -121,7 +123,7 @@ impl AuthExtractor for BasicAuthExtractor {
                         .with_type(errors::TAG_UXUM_AUTH)
                         .with_title("Invalid HTTP Basic realm value")
                         .with_detail(err.to_string())
-                        .into_response()
+                        .into_response();
                 }
             };
             let _ = resp.headers_mut().insert(WWW_AUTHENTICATE, header_value);
@@ -361,7 +363,7 @@ impl AuthExtractor for JwtAuthExtractor {
                         .with_type(errors::TAG_UXUM_AUTH)
                         .with_title("Invalid HTTP Basic realm value")
                         .with_detail(err.to_string())
-                        .into_response()
+                        .into_response();
                 }
             };
             let _ = resp.headers_mut().insert(WWW_AUTHENTICATE, header_value);
@@ -461,6 +463,38 @@ impl JwtAuthExtractor {
     /// See [`jsonwebtoken::Validation`].
     pub fn set_validation(&mut self, valid: jwt::Validation) {
         self.validation = valid;
+    }
+}
+
+/// Authentication extractor (front-end) for SPIFFE X.509 SVIDs.
+#[cfg(feature = "spiffe")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpiffeAuthExtractor;
+
+#[cfg(feature = "spiffe")]
+impl AuthExtractor for SpiffeAuthExtractor {
+    fn extract_auth(&self, req: &Request<Body>) -> Result<(Option<UserId>, AuthToken), AuthError> {
+        match req.extensions().get::<PeerIdentity>() {
+            Some(ident) => match ident.spiffe_id() {
+                Some(sid) => Ok((Some(sid.to_string().into()), AuthToken::ExternallyVerified)),
+                None => Err(AuthError::NoAuthProvided),
+            },
+            None => Err(AuthError::NoAuthProvided),
+        }
+    }
+
+    fn error_response(&self, err: AuthError) -> Response<Body> {
+        let status = match err {
+            AuthError::NoAuthProvided
+            | AuthError::UserNotFound
+            | AuthError::AuthFailed
+            | AuthError::NoPermission(_) => StatusCode::FORBIDDEN,
+            _ => StatusCode::BAD_REQUEST,
+        };
+        problemdetails::new(status)
+            .with_type(errors::TAG_UXUM_AUTH)
+            .with_title(err.to_string())
+            .into_response()
     }
 }
 

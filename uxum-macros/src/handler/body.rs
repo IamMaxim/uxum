@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream;
-use quote::{quote, ToTokens, TokenStreamExt};
+use quote::{ToTokens, TokenStreamExt, quote};
 use syn::{
     AngleBracketedGenericArguments, FnArg, GenericArgument, ItemFn, Path, PathArguments, Type,
     TypePath,
@@ -21,12 +21,12 @@ impl ToTokens for RequestBody {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let media_type = self.media_type();
         let schema = match self {
-            Self::String => quote! { gen.subschema_for::<String>().into_object() },
+            Self::String => quote! { r#gen.subschema_for::<String>().into_object() },
             Self::Bytes => {
-                quote! { gen.subschema_for::<::uxum::reexport::bytes::Bytes>().into_object() }
+                quote! { r#gen.subschema_for::<::uxum::reexport::bytes::Bytes>().into_object() }
             }
             Self::Form => return, // TODO: write this.
-            Self::Json(path) => quote! { gen.subschema_for::<#path>().into_object() },
+            Self::Json(path) => quote! { r#gen.subschema_for::<#path>().into_object() },
         };
         tokens.append_all(quote! {
             openapi3::RequestBody {

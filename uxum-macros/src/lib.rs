@@ -4,16 +4,23 @@
 
 #![forbid(unsafe_code)]
 #![deny(elided_lifetimes_in_paths, unreachable_pub)]
+#![warn(
+    missing_docs,
+    clippy::doc_link_with_quotes,
+    clippy::doc_markdown,
+    clippy::missing_errors_doc
+)]
+#![cfg_attr(test, deny(warnings))]
 
 mod case;
 mod handler;
 mod util;
 
-use darling::{ast::NestedMeta, FromMeta};
+use darling::{FromMeta, ast::NestedMeta};
 use proc_macro::TokenStream;
 use proc_macro_error::{abort, abort_call_site, proc_macro_error};
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, ItemFn};
+use syn::{ItemFn, parse_macro_input};
 
 use crate::{
     case::{ToCamelCase, ToSnakeCase},
@@ -182,7 +189,7 @@ pub fn handler(args: TokenStream, input: TokenStream) -> TokenStream {
 
                 #[inline]
                 #[must_use]
-                fn openapi_spec(&self, gen: &mut schemars::gen::SchemaGenerator) -> openapi3::Operation {
+                fn openapi_spec(&self, r#gen: &mut schemars::r#gen::SchemaGenerator) -> openapi3::Operation {
                     #handler_spec
                 }
             }

@@ -1,34 +1,62 @@
 //! HTTP client - configuration.
 
-use std::{collections::BTreeMap, num::NonZeroU32, path::Path, str::FromStr, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::SocketAddr,
+    num::NonZeroU32,
+    path::Path,
+    str::FromStr,
+    time::Duration,
+};
 
 use reqwest::{
-    header::{HeaderName, HeaderValue},
     ClientBuilder, Identity,
+    header::{HeaderName, HeaderValue},
 };
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
 use tokio::{fs::OpenOptions, io::AsyncReadExt};
 
+#[cfg(feature = "spiffe")]
+use crate::spiffe::SpiffeConfig;
 use crate::{
     http_client::{
         cb::HttpClientCircuitBreakerConfig, errors::HttpClientError, middleware::wrap_client,
     },
     metrics::ClientMetricsState,
+    util::OptVec,
 };
+
+/// HTTP client kind.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HttpClientKind {
+    /// Standard client without extra identification.
+    #[default]
+    Plain,
+    /// Mutual TLS with static certificate.
+    Mtls {
+        /// Path to PEM-formatted file containing a private key and at least one client certificate.
+        #[serde(alias = "client_key", alias = "identity")]
+        client_cert: Box<Path>,
+    },
+    /// Mutual TLS with SPIFFE for authentication and authorization.
+    #[cfg(feature = "spiffe")]
+    Spiffe {
+        /// SPIFFE configuration.
+        #[serde(default)]
+        spiffe: Box<SpiffeConfig>,
+    },
+}
 
 /// HTTP client configuration.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct HttpClientConfig {
-    /// Path to PEM-formatted file containing a private key and at least one client certificate.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "client_key",
-        alias = "identity"
-    )]
-    pub client_cert: Option<Box<Path>>,
+    /// HTTP client kind to use.
+    #[serde(default, flatten)]
+    pub kind: HttpClientKind,
     /// Set a timeout for only the connect phase of a client.
     ///
     /// Default is `None`.
@@ -113,6 +141,13 @@ pub struct HttpClientConfig {
         alias = "circuit_breaker"
     )]
     pub cb: Option<HttpClientCircuitBreakerConfig>,
+    /// List of overrides for domain name resolution.
+    ///
+    /// Use domain name as key, and a socket address as value.
+    /// Port 0 for socket address will use a well-known port for
+    /// a protocol, otherwise a chosen port will always be used.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub domain_overrides: HashMap<String, OptVec<SocketAddr>>,
     /// Short application name.
     #[serde(skip)]
     app_name: Option<String>,
@@ -124,7 +159,7 @@ pub struct HttpClientConfig {
 impl Default for HttpClientConfig {
     fn default() -> Self {
         Self {
-            client_cert: None,
+            kind: HttpClientKind::default(),
             connect_timeout: None,
             read_timeout: None,
             request_timeout: None,
@@ -137,6 +172,7 @@ impl Default for HttpClientConfig {
             tcp: HttpClientTcpConfig::default(),
             http2: HttpClientHttp2Config::default(),
             cb: None,
+            domain_overrides: HashMap::new(),
             app_name: None,
             app_version: None,
         }
@@ -207,9 +243,11 @@ impl HttpClientConfig {
             .use_rustls_tls()
             .min_tls_version(reqwest::tls::Version::TLS_1_2)
             .connection_verbose(self.verbose)
+            .hickory_dns(true)
             .pool_idle_timeout(self.pool_idle_timeout)
             .pool_max_idle_per_host(self.pool_max_idle_per_host)
             .tls_sni(true)
+            .tls_info(true)
             .redirect(self.redirect.into())
             .referer(self.referer)
             .tcp_nodelay(self.tcp.nodelay)
@@ -222,8 +260,17 @@ impl HttpClientConfig {
             .http2_keep_alive_interval(self.http2.keepalive.interval)
             .http2_keep_alive_while_idle(self.http2.keepalive.while_idle)
             .http2_max_frame_size(self.http2.max_frame_size.map(NonZeroU32::get));
-        if let Some(client_cert) = &self.client_cert {
-            builder = builder.identity(load_identity(client_cert).await?);
+        match self.kind {
+            HttpClientKind::Plain => {}
+            HttpClientKind::Mtls { ref client_cert } => {
+                builder = builder.identity(load_identity(client_cert).await?);
+            }
+            #[cfg(feature = "spiffe")]
+            HttpClientKind::Spiffe { ref spiffe } => {
+                // TODO: pass metrics here somehow? or unify SVID source.
+                let rustls_config = spiffe.rustls_client_config(None).await?;
+                builder = builder.use_preconfigured_tls(rustls_config);
+            }
         }
         if let Some(connect_timeout) = self.connect_timeout {
             builder = builder.connect_timeout(connect_timeout);
@@ -252,6 +299,9 @@ impl HttpClientConfig {
         }
         if let Some(user_agent) = self.user_agent() {
             builder = builder.user_agent(user_agent);
+        }
+        for (domain, sockaddrs) in &self.domain_overrides {
+            builder = builder.resolve_to_addrs(domain, sockaddrs.as_ref());
         }
         Ok(builder)
     }

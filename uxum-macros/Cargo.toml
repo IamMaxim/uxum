@@ -1,10 +1,10 @@
 [package]
 name = "uxum-macros"
-version = "0.4.2"
+version = "0.5.0"
 authors = ["Alex Unigovsky <unik@devrandom.ru>"]
 license = "MIT OR Apache-2.0"
-edition = "2021"
-rust-version = "1.74"
+edition = "2024"
+rust-version = "1.85"
 repository = "https://github.com/unikmhz/uxum"
 description = "Procedural macros for uxum framework"
 readme = "../README.md"
@@ -25,11 +25,11 @@ sign-tag = false
 tag-message = "uxum-macros {{version}}"
 
 [dependencies]
-convert_case = "0.8"
-darling = "0.20.10"
+convert_case = "0.11"
+darling = "0.23"
 mime = "0.3"
 proc-macro2 = "1.0"
 proc-macro-error = "1.0"
 quote = "1.0"
-regex = "1.11"
+regex = "1.12"
 syn = "2.0"

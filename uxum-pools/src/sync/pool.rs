@@ -12,7 +12,7 @@ use tracing::debug_span;
 
 use crate::{
     error::Error,
-    metrics::{pool_kv, Metrics, POOL_METRICS},
+    metrics::{Metrics, POOL_METRICS, pool_kv},
     resource::InstrumentedResource,
     sync::InstrumentablePool,
 };

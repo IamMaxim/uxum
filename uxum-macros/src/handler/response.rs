@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream;
-use quote::{quote, ToTokens, TokenStreamExt};
+use quote::{ToTokens, TokenStreamExt, quote};
 use syn::{ItemFn, ReturnType, Type};
 
 /// Detected response type.
@@ -26,7 +26,7 @@ impl ToTokens for ResponseTemplate {
                 }
             },
             Self::Typed(inner) => quote! {
-                <#inner as uxum::GetResponseSchemas>::get_responses(gen)
+                <#inner as uxum::GetResponseSchemas>::get_responses(r#gen)
             },
         };
         tokens.append_all(new_tokens)

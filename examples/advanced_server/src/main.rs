@@ -5,10 +5,10 @@ use std::{net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use uxum::{
+    GetResponseSchemas, ResponseSchema,
     crypto::ensure_default_crypto_provider,
     prelude::*,
-    reexport::{problemdetails, reqwest, reqwest_middleware, tokio},
-    GetResponseSchemas, ResponseSchema,
+    reexport::{problemdetails, reqwest, reqwest_middleware, tokio, tower_http::ServiceBuilderExt},
 };
 
 /// Application entry point.
@@ -18,6 +18,7 @@ fn main() -> Result<(), HandleError> {
     // Load configuration from file.
     let mut config = ServiceConfig::builder()
         .with_file("examples/advanced_server/config.yaml")
+        .with_env("ADVSRV")
         .build()
         .expect("Unable to load configuration");
     // Add some hard-coded values to [`AppConfig`].
@@ -44,10 +45,10 @@ async fn run(mut config: ServiceConfig) -> Result<(), HandleError> {
         .handle()
         .await
         .expect("Error initializing handle");
-    // Create app builder from app config.
-    //
-    // Also enable the auth subsystem.
-    let mut app_builder = AppBuilder::from_config(&config.app).map_err(HandleError::custom)?;
+    // Create app builder from app config, and set up custom behaviors.
+    let mut app_builder = AppBuilder::from_config(&config.app)
+        .map_err(HandleError::custom)?
+        .with_behavior(AdvServerBehavior);
     // Some hard-coded parameters for built-in API documentation.
     app_builder.configure_api_doc(|api_doc| {
         api_doc
@@ -82,8 +83,55 @@ async fn run(mut config: ServiceConfig) -> Result<(), HandleError> {
     let svc = app.into_make_service_with_connect_info::<SocketAddr>();
     // Start the service.
     handle
-        .run(config.server, svc, Some(Duration::from_secs(5)))
+        .run(config.servers, svc, Some(Duration::from_secs(5)))
         .await
+}
+
+/// Custom behaviors for this application.
+#[derive(Clone, Debug)]
+struct AdvServerBehavior;
+
+impl AppBehavior for AdvServerBehavior {
+    // This monstrosity can be used to inject additional layers in global layer pipeline for
+    // requests.
+    fn layer<InSvc, InResp>(
+        self,
+    ) -> impl uxum::reexport::tower::Layer<
+        InSvc,
+        Service = impl uxum::reexport::tower::Service<
+            http::Request<axum::body::Body>,
+            Response = http::Response<
+                impl axum::body::HttpBody<Data = prost::bytes::Bytes, Error = axum::BoxError> + Send,
+            >,
+            Error = std::convert::Infallible,
+            Future = impl Send,
+        > + Clone
+                  + Send
+                  + Sync,
+    > + Clone
+    + Send
+    + Sync
+    where
+        InSvc: uxum::reexport::tower::Service<
+                http::Request<axum::body::Body>,
+                Response = http::Response<InResp>,
+                Error = std::convert::Infallible,
+            > + Clone
+            + Send
+            + Sync,
+        InSvc::Future: Send,
+        InResp: axum::body::HttpBody<Data = prost::bytes::Bytes, Error = axum::BoxError> + Send,
+        InResp::Data: Send,
+    {
+        uxum::reexport::tower::ServiceBuilder::new()
+            .compression()
+            .concurrency_limit(4)
+    }
+
+    async fn readiness_probe(&self) -> impl IntoResponse {
+        tracing::warn!("Ready as ever!");
+        StatusCode::OK
+    }
 }
 
 /// Sleep for some time and return response.
@@ -212,14 +260,14 @@ impl IntoResponse for GetRandomError {
 
 impl GetResponseSchemas for GetRandomError {
     type ResponseIter = [ResponseSchema; 1];
-    fn get_response_schemas(gen: &mut schemars::gen::SchemaGenerator) -> Self::ResponseIter {
+    fn get_response_schemas(r#gen: &mut schemars::r#gen::SchemaGenerator) -> Self::ResponseIter {
         [ResponseSchema {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             response: openapi3::Response {
                 description: "Error response".into(),
                 content: okapi::map! {
                     mime::APPLICATION_JSON.to_string() => openapi3::MediaType {
-                        schema: Some(gen.subschema_for::<Self>().into_object()),
+                        schema: Some(r#gen.subschema_for::<Self>().into_object()),
                         ..Default::default()
                     },
                 },
@@ -251,8 +299,8 @@ mod counter_state {
     use std::{
         ops::Deref,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -316,7 +364,7 @@ mod counter_state {
 mod hello {
     use uxum::reexport::{
         bytes::Bytes,
-        opentelemetry::{global, metrics::Counter, KeyValue},
+        opentelemetry::{KeyValue, global, metrics::Counter},
     };
 
     use super::*;
@@ -418,11 +466,10 @@ mod hello {
 
         pub use advanced_server::hello_service_server::HelloServiceServer;
         use advanced_server::{
-            hello_service_server::HelloService, SayHelloRequest, SayHelloResponse,
+            SayHelloRequest, SayHelloResponse, hello_service_server::HelloService,
         };
         use tonic::{Request, Response, Status};
-        use uxum::reexport::opentelemetry::KeyValue;
-        use uxum::AdditionalMetricLabels;
+        use uxum::{AdditionalMetricLabels, reexport::opentelemetry::KeyValue};
 
         #[derive(Debug)]
         pub struct Hello;
@@ -483,7 +530,7 @@ mod distributed_tracing {
     // I didn't bother to provide correct schema here.
     impl GetResponseSchemas for CallInnerError {
         type ResponseIter = [ResponseSchema; 1];
-        fn get_response_schemas(_gen: &mut schemars::gen::SchemaGenerator) -> Self::ResponseIter {
+        fn get_response_schemas(_gen: &mut schemars::r#gen::SchemaGenerator) -> Self::ResponseIter {
             [ResponseSchema {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 response: openapi3::Response {
@@ -527,7 +574,7 @@ mod distributed_tracing {
     async fn call_inner(state: State<TracingState>) -> Result<String, CallInnerError> {
         Ok(state
             .client
-            .get("http://127.0.0.1:8081/inner")
+            .get("https://127.0.0.1:8008/inner")
             .send()
             .await?
             .text()

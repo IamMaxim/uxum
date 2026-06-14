@@ -1,12 +1,13 @@
+//! OpenTelemetry metrics for instrumented pools.
+
 use std::{
     borrow::Cow,
     sync::{Arc, LazyLock},
 };
 
 use opentelemetry::{
-    global,
+    Key, KeyValue, StringValue, Value, global,
     metrics::{Gauge, Histogram},
-    Key, KeyValue, StringValue, Value,
 };
 
 /// Central metrics singleton for instrumented pool metrics.

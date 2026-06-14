@@ -6,20 +6,20 @@ use opentelemetry_otlp::{
     ExporterBuildError, SpanExporter as OtlpSpanExporter, WithExportConfig, WithTonicConfig,
 };
 use opentelemetry_sdk::{
+    Resource,
     trace::{
         BatchConfig, BatchConfigBuilder, BatchSpanProcessor, Sampler, SdkTracerProvider, Tracer,
     },
-    Resource,
 };
 use opentelemetry_stdout::SpanExporter as StdoutSpanExporter;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug_span, Instrument, Level, Subscriber};
+use tracing::{Instrument, Level, Subscriber, debug_span};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{
+    Layer,
     filter::{Filtered, Targets},
     registry::LookupSpan,
-    Layer,
 };
 use url::Url;
 
@@ -34,9 +34,6 @@ pub enum TracingError {
     /// Exporter builder error.
     #[error("OTel span exporter builder error: {0}")]
     OpenTelemetry(#[from] ExporterBuildError),
-    /// OTel tracing error.
-    #[error("OTel tracing error: {0}")]
-    Tracing(#[from] opentelemetry_sdk::trace::TraceError),
     /// Error loading files in configuration.
     #[error("Error loading files in configuration: {0}")]
     ConfigRead(IoError),

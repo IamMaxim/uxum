@@ -1,12 +1,13 @@
 //! Authentication and authorization [`tower`] layer and service.
 
 use std::{
+    borrow::Borrow,
     future::Future,
     marker::PhantomData,
     ops::Deref,
     pin::Pin,
     sync::Arc,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use axum::{
@@ -17,9 +18,12 @@ use axum::{
 use dyn_clone::clone_box;
 use pin_project::pin_project;
 use tower::{BoxError, Layer, Service};
-use tracing::{trace_span, warn};
+use tracing::{trace, trace_span, warn};
 
-use crate::auth::{extractor::AuthExtractor, provider::AuthProvider, user::UserId};
+use crate::{
+    auth::{extractor::AuthExtractor, provider::AuthProvider, user::UserId},
+    logging::span::set_user_name,
+};
 
 /// Authentication and authorization [`tower`] layer.
 #[derive(Clone)]
@@ -128,7 +132,10 @@ where
         let span = trace_span!("auth").entered();
         // Extract user and/or auth token from request.
         let (user, token) = match self.auth_extractor.extract_auth(&req) {
-            Ok(pair) => pair,
+            Ok(pair) => {
+                trace!(user_id = ?pair.0, token = ?pair.1, "auth extracted");
+                pair
+            }
             Err(error) => {
                 warn!(cause = %error, "auth extraction error");
                 return AuthFuture::Negative {
@@ -136,6 +143,9 @@ where
                 };
             }
         };
+        if let Some(user) = &user {
+            set_user_name(<UserId as Borrow<str>>::borrow(user));
+        }
         // Authenticate user.
         if let Err(error) = self.auth_provider.authenticate(user.as_ref(), &token) {
             warn!(cause = %error, "authentication error");
