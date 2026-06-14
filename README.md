@@ -150,7 +150,7 @@ async fn run(args: Args, mut config: ServiceConfig) -> Result<(), anyhow::Error>
     // start more than one server, if for example you have specified both TLS and
     // non-TLS listener configuration.
     handle
-        .run(config.server, svc, Some(Duration::from_secs(5)))
+        .run(config.servers, svc, Some(Duration::from_secs(5)))
         .await
         .map_err(Into::into)
 }
@@ -189,7 +189,7 @@ variables, or modify specific parameters at runtime.
 All configuration parameters are optional, and provide reasonable defaults. Default values are
 described for each individual parameter below.
 
-Time duration/interval values are parsed from human-readable format using [`humantime`] crate.
+Time duration/interval values are parsed from human-readable format using [`humantime_serde`] crate.
 For example: `5s`, `100ms` or `1h`.
 
 > **Note**: This section is a rather terse placeholder documentation until a guidebook is ready.
