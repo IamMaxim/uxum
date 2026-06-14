@@ -5,6 +5,9 @@ logging:
       targets:
         h2: INFO
         hyper: INFO
+        opentelemetry-otlp: INFO
+        opentelemetry_sdk: INFO
+        rdkafka: INFO
         tonic: INFO
         tower: INFO
       color: true
@@ -28,6 +31,12 @@ logging:
 telemetry:
   labels:
     env: example
+metrics:
+  exporters:
+    - type: prometheus
+      labels: some
+      included_labels:
+        - env
 tracing:
   exporters:
     - type: otlp
@@ -40,6 +49,19 @@ tracing:
     inactivity: true
     thread_info: true
   level: TRACE
+auth:
+  extractor:
+    type: spiffe
+  provider:
+    type: config
+  roles:
+    basic:
+      permissions:
+        - call
+  users:
+    "spiffe://example.org/myservice":
+      roles:
+        - basic
 servers:
-  - kind: plain
+  - kind: spiffe
     listen: 127.0.0.1:8008

@@ -3,6 +3,8 @@
 use thiserror::Error;
 
 use crate::errors::IoError;
+#[cfg(feature = "spiffe")]
+use crate::spiffe::SpiffeError;
 
 /// Error type used in HTTP client subsystem.
 #[derive(Debug, Error)]
@@ -14,6 +16,10 @@ pub enum HttpClientError {
     /// Error loading TLS identity.
     #[error("Error loading TLS identity: {0}")]
     IdentityLoad(IoError),
+    /// Error configuring SPIFFE.
+    #[cfg(feature = "spiffe")]
+    #[error("Error configuring SPIFFE: {0}")]
+    Spiffe(#[from] SpiffeError),
 }
 
 impl HttpClientError {

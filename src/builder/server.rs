@@ -95,6 +95,7 @@ pub enum ServerBuilderError {
 /// HTTP server kind.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ServerKind {
     /// Standard axum server without TLS.
     #[default]
@@ -121,7 +122,7 @@ pub enum ServerKind {
 pub struct ServerBuilder {
     /// Server kind to use.
     #[serde(default, flatten)]
-    kind: ServerKind,
+    pub kind: ServerKind,
     /// Host/address and port to listen on.
     #[serde(default = "ServerBuilder::default_listen")]
     pub listen: String,
@@ -244,7 +245,7 @@ impl ServerBuilder {
         let span = debug_span!("build_spiffe_server");
         async move {
             let listener = self.create_listener(&self.listen).await?;
-            let rustls_config = spiffe_config.rustls_config(metrics).await?;
+            let rustls_config = spiffe_config.rustls_server_config(metrics).await?;
             let acceptor = SpiffeAcceptor::from(RustlsAcceptor::new(rustls_config));
             let mut server = axum_server::from_tcp(listener)
                 .map_err(|err| ServerBuilderError::BuildServer(err.into()))?

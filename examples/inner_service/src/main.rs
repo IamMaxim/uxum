@@ -1,13 +1,10 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
-use uxum::{
-    prelude::*,
-    reexport::{axum_server::Handle, tokio},
-};
+use uxum::{prelude::*, reexport::tokio};
 
 /// Application entry point
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), HandleError> {
     // Load configuration from file
     let mut config: ServiceConfig = ServiceConfig::builder()
         .with_file("examples/inner_service/config.yaml")
@@ -22,7 +19,7 @@ async fn main() {
     //
     // Logging will start working right after this call, and until the returned
     // guard is dropped.
-    let _uxum_handle = app_cfg.handle().await.expect("Error initializing handle");
+    let mut handle = app_cfg.handle().await.expect("Error initializing handle");
     // Create app builder from app config
     //
     // Also enable the auth subsystem.
@@ -38,23 +35,15 @@ async fn main() {
     });
     // Build main application router
     let app = app_builder.build().expect("Unable to build app");
-    // Create server handle
-    let handle = Handle::new();
-    // Build server, link the handle and run the app
-    config
-        .servers
-        .pop()
-        .expect("No servers defined")
-        .build()
+    // Convert into service.
+    let svc = app.into_make_service_with_connect_info::<SocketAddr>();
+    // Start the service.
+    handle
+        .run(config.servers, svc, Some(Duration::from_secs(5)))
         .await
-        .expect("Unable to build server")
-        .handle(handle)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .expect("Server error");
 }
 
-#[handler]
+#[handler(permissions = ["call"])]
 async fn inner() -> String {
     "w00t!".into()
 }

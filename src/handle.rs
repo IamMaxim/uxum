@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, debug_span, error, info};
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_record_hierarchical::HierarchicalRecord;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
@@ -410,7 +411,10 @@ impl AppConfig {
             let tracer_provider = tcfg.build_provider(otel_res.clone()).await?;
             let tracer = tracer_provider.tracer("uxum");
             let layer = tcfg.build_layer(&tracer);
-            registry.with(layer).init();
+            registry
+                .with(layer)
+                .with(HierarchicalRecord::default())
+                .init();
             opentelemetry::global::set_text_map_propagator(
                 opentelemetry_sdk::propagation::TraceContextPropagator::default(),
             );

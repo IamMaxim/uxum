@@ -5,6 +5,7 @@ use opentelemetry::{propagation::Extractor, trace::TraceContextExt};
 use tower_http::{request_id::RequestId, trace::MakeSpan};
 use tracing::{Level, Span, field::Empty};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_record_hierarchical::SpanExt;
 
 const DEFAULT_MESSAGE_LEVEL: Level = Level::DEBUG;
 
@@ -74,6 +75,7 @@ impl MakeSpan<Body> for CustomMakeSpan {
                         "otel.kind" = "server",
                         "trace_id" = Empty,
                         "span_id" = Empty,
+                        "user.name" = Empty,
                         "x_request_id" = x_request_id,
                         "http.request.method" = %request.method(),
                         "url.full" = %request.uri(),
@@ -87,6 +89,7 @@ impl MakeSpan<Body> for CustomMakeSpan {
                         "otel.kind" = "server",
                         "trace_id" = Empty,
                         "span_id" = Empty,
+                        "user.name" = Empty,
                         "x_request_id" = x_request_id,
                         "http.request.method" = %request.method(),
                         "url.full" = %request.uri(),
@@ -142,4 +145,10 @@ impl Extractor for HeaderExtractor<'_> {
             .map(|value| value.as_str())
             .collect::<Vec<_>>()
     }
+}
+
+pub(crate) fn set_user_name(name: impl AsRef<str>) {
+    let name = name.as_ref();
+    let span = tracing::Span::current();
+    span.record_hierarchical("user.name", name);
 }

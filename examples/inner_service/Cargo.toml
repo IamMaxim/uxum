@@ -11,5 +11,5 @@ publish = false
 
 [dependencies]
 serde = {version = "1.0", features = ["derive"]}
-uxum = { path = "../.." }
+uxum = { path = "../..", features = ["spiffe"] }
 tracing = {version = "0.1", features = ["std"]}

@@ -17,6 +17,8 @@ use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
 use tokio::{fs::OpenOptions, io::AsyncReadExt};
 
+#[cfg(feature = "spiffe")]
+use crate::spiffe::SpiffeConfig;
 use crate::{
     http_client::{
         cb::HttpClientCircuitBreakerConfig, errors::HttpClientError, middleware::wrap_client,
@@ -25,18 +27,36 @@ use crate::{
     util::OptVec,
 };
 
+/// HTTP client kind.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HttpClientKind {
+    /// Standard client without extra identification.
+    #[default]
+    Plain,
+    /// Mutual TLS with static certificate.
+    Mtls {
+        /// Path to PEM-formatted file containing a private key and at least one client certificate.
+        #[serde(alias = "client_key", alias = "identity")]
+        client_cert: Box<Path>,
+    },
+    /// Mutual TLS with SPIFFE for authentication and authorization.
+    #[cfg(feature = "spiffe")]
+    Spiffe {
+        /// SPIFFE configuration.
+        #[serde(default)]
+        spiffe: Box<SpiffeConfig>,
+    },
+}
+
 /// HTTP client configuration.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct HttpClientConfig {
-    /// Path to PEM-formatted file containing a private key and at least one client certificate.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "client_key",
-        alias = "identity"
-    )]
-    pub client_cert: Option<Box<Path>>,
+    /// HTTP client kind to use.
+    #[serde(default, flatten)]
+    pub kind: HttpClientKind,
     /// Set a timeout for only the connect phase of a client.
     ///
     /// Default is `None`.
@@ -139,7 +159,7 @@ pub struct HttpClientConfig {
 impl Default for HttpClientConfig {
     fn default() -> Self {
         Self {
-            client_cert: None,
+            kind: HttpClientKind::default(),
             connect_timeout: None,
             read_timeout: None,
             request_timeout: None,
@@ -240,8 +260,17 @@ impl HttpClientConfig {
             .http2_keep_alive_interval(self.http2.keepalive.interval)
             .http2_keep_alive_while_idle(self.http2.keepalive.while_idle)
             .http2_max_frame_size(self.http2.max_frame_size.map(NonZeroU32::get));
-        if let Some(client_cert) = &self.client_cert {
-            builder = builder.identity(load_identity(client_cert).await?);
+        match self.kind {
+            HttpClientKind::Plain => {}
+            HttpClientKind::Mtls { ref client_cert } => {
+                builder = builder.identity(load_identity(client_cert).await?);
+            }
+            #[cfg(feature = "spiffe")]
+            HttpClientKind::Spiffe { ref spiffe } => {
+                // TODO: pass metrics here somehow? or unify SVID source.
+                let rustls_config = spiffe.rustls_client_config(None).await?;
+                builder = builder.use_preconfigured_tls(rustls_config);
+            }
         }
         if let Some(connect_timeout) = self.connect_timeout {
             builder = builder.connect_timeout(connect_timeout);

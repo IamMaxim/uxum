@@ -82,6 +82,7 @@ tracing:
   response_level: INFO
 http_clients:
   tracing:
+    kind: spiffe
     connect_timeout: 100ms
     timeout: 200ms
     verbose: true
@@ -94,6 +95,7 @@ auth:
   extractor:
     type: stacked
     extractors:
+      - type: spiffe
       - type: jwt
         realm: UXUM_REALM
         algo: HS256

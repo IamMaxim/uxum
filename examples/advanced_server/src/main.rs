@@ -575,7 +575,7 @@ mod distributed_tracing {
     async fn call_inner(state: State<TracingState>) -> Result<String, CallInnerError> {
         Ok(state
             .client
-            .get("http://127.0.0.1:8008/inner")
+            .get("https://127.0.0.1:8008/inner")
             .send()
             .await?
             .text()

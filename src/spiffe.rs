@@ -10,12 +10,14 @@ use axum_server::{
     tls_rustls::{RustlsAcceptor, RustlsConfig},
 };
 use futures::future::BoxFuture;
+use rustls::ClientConfig;
 use serde::{Deserialize, Serialize};
 use spiffe::{
     SpiffeIdError, X509ResourceLimits, X509Source, X509SourceError, cert::error::CertificateError,
 };
 use spiffe_rustls::{
-    Error as SpiffeRustlsError, TrustDomain, TrustDomainPolicy, authorizer, mtls_server,
+    Error as SpiffeRustlsError, TrustDomain, TrustDomainPolicy, authorizer, mtls_client,
+    mtls_server,
 };
 use spiffe_rustls_tokio::PeerIdentity;
 use thiserror::Error;
@@ -133,6 +135,7 @@ impl SpiffeConfig {
         &self,
         metrics: Option<SpiffeMetrics>,
     ) -> Result<X509Source, SpiffeError> {
+        // TODO: use unified X.509 source for all servers and clients.
         let mut builder = X509Source::builder();
         if let Some(ref limits) = self.limits {
             builder = builder.resource_limits(limits.clone().into());
@@ -161,12 +164,12 @@ impl SpiffeConfig {
         builder.build().await.map_err(Into::into)
     }
 
-    /// Generate configuration object for RusTLS.
+    /// Generate configuration object for server-side RusTLS.
     ///
     /// # Errors
     ///
     /// Returns `Err` if provided SPIFFE configuration is invalid.
-    pub async fn rustls_config(
+    pub async fn rustls_server_config(
         &self,
         metrics: Option<SpiffeMetrics>,
     ) -> Result<RustlsConfig, SpiffeError> {
@@ -182,8 +185,35 @@ impl SpiffeConfig {
             ),
         };
         builder = builder.trust_domain_policy(self.trust_domain_policy.clone().try_into()?);
+        // TODO: add customizer function support.
         let config = builder.with_alpn_protocols(&self.alpn_protocols).build()?;
         Ok(RustlsConfig::from_config(Arc::new(config)))
+    }
+
+    /// Generate configuration object for client-side RusTLS.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if provided SPIFFE configuration is invalid.
+    pub async fn rustls_client_config(
+        &self,
+        metrics: Option<SpiffeMetrics>,
+    ) -> Result<ClientConfig, SpiffeError> {
+        let source = self.build_source(metrics).await?;
+        let mut builder = mtls_client(source);
+        builder = match &self.authorize {
+            SpiffeAuthorize::Any => builder.authorize(authorizer::any()),
+            SpiffeAuthorize::Exact { spiffe_ids } => {
+                builder.authorize(authorizer::exact(spiffe_ids.iter().map(|s| s.as_str()))?)
+            }
+            SpiffeAuthorize::TrustDomains { trust_domains } => builder.authorize(
+                authorizer::trust_domains(trust_domains.iter().map(|s| s.as_str()))?,
+            ),
+        };
+        builder = builder.trust_domain_policy(self.trust_domain_policy.clone().try_into()?);
+        // TODO: add customizer function support.
+        let config = builder.with_alpn_protocols(&self.alpn_protocols).build()?;
+        Ok(config)
     }
 }
 
@@ -359,7 +389,7 @@ where
                         CertificateError::MissingSpiffeId | CertificateError::MultipleSpiffeIds => {
                             PeerIdentity::new(None)
                         }
-                        _ => return Err(io::Error::new(io::ErrorKind::Other, err.to_string())),
+                        _ => return Err(io::Error::other(err.to_string())),
                     },
                 }
             } else {
