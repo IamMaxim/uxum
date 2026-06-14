@@ -84,7 +84,7 @@ impl HandlerSpec {
                         explode: None,
                         allow_reserved: false,
                         // FIXME: subschema.
-                        schema: gen.subschema_for::<#value_type>().into_object(),
+                        schema: r#gen.subschema_for::<#value_type>().into_object(),
                         example: None,
                         examples: None,
                     },

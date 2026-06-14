@@ -3,8 +3,8 @@ name = "custom_layer"
 version = "0.1.0"
 authors = ["Alex Unigovsky <unik@devrandom.ru>"]
 license = "MIT OR Apache-2.0"
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.85"
 repository = "https://github.com/unikmhz/uxum"
 description = "UXUM framework - custom layer example"
 publish = false
@@ -14,5 +14,6 @@ uxum = { path = "../.." }
 aliri = "0.6.4"
 aliri_tower = "0.6.1"
 aliri_oauth2 = "0.10.2"
+# TODO: unpin/bump tower-http after aliri crate updates.
 tower-http = { version = "=0.5.2", features = ["validate-request"] }
-tracing = {version = "0.1", features = ["std"]}
+tracing = { version = "0.1", features = ["std"] }

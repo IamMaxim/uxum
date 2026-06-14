@@ -34,9 +34,6 @@ pub enum TracingError {
     /// Exporter builder error.
     #[error("OTel span exporter builder error: {0}")]
     OpenTelemetry(#[from] ExporterBuildError),
-    /// OTel tracing error.
-    #[error("OTel tracing error: {0}")]
-    Tracing(#[from] opentelemetry_sdk::trace::TraceError),
     /// Error loading files in configuration.
     #[error("Error loading files in configuration: {0}")]
     ConfigRead(IoError),

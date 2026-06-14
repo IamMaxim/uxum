@@ -8,12 +8,12 @@ use std::{
 
 use opentelemetry::KeyValue;
 use parking_lot::Mutex;
-use tracing::{debug_span, Instrument};
+use tracing::{Instrument, debug_span};
 
 use crate::{
-    error::Error,
-    metrics::{pool_kv, Metrics, POOL_METRICS},
     r#async::InstrumentablePool,
+    error::Error,
+    metrics::{Metrics, POOL_METRICS, pool_kv},
     resource::InstrumentedResource,
 };
 

@@ -6,9 +6,8 @@ use std::{
 };
 
 use opentelemetry::{
-    global,
+    Key, KeyValue, StringValue, Value, global,
     metrics::{Gauge, Histogram},
-    Key, KeyValue, StringValue, Value,
 };
 
 /// Central metrics singleton for instrumented pool metrics.

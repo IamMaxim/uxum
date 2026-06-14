@@ -5,7 +5,7 @@ mod pool;
 
 use std::time::Duration;
 
-pub use crate::{error::Error, metrics::PoolState, r#async::pool::InstrumentedPool};
+pub use crate::{r#async::pool::InstrumentedPool, error::Error, metrics::PoolState};
 
 /// Pool objects implementing this trait can be instrumented.
 #[async_trait::async_trait]

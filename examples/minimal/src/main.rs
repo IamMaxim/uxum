@@ -2,11 +2,11 @@
 //! This does not use AppBuilder, only ServerBuilder.
 
 use uxum::{
+    ServerBuilder,
     reexport::{
-        axum::{routing::get, Router},
+        axum::{Router, routing::get},
         tokio,
     },
-    ServerBuilder,
 };
 
 #[tokio::main]

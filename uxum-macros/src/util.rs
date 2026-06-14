@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream;
-use quote::{quote_spanned, ToTokens};
+use quote::{ToTokens, quote_spanned};
 use syn::spanned::Spanned;
 
 /// Convert `Option<T>` to a token stream, maintaining spans.

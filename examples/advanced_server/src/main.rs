@@ -5,10 +5,10 @@ use std::{net::SocketAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use uxum::{
+    GetResponseSchemas, ResponseSchema,
     crypto::ensure_default_crypto_provider,
     prelude::*,
     reexport::{problemdetails, reqwest, reqwest_middleware, tokio, tower_http::ServiceBuilderExt},
-    GetResponseSchemas, ResponseSchema,
 };
 
 /// Application entry point.
@@ -106,11 +106,11 @@ impl AppBehavior for AdvServerBehavior {
             Error = std::convert::Infallible,
             Future = impl Send,
         > + Clone
-                      + Send
-                      + Sync,
+                  + Send
+                  + Sync,
     > + Clone
-           + Send
-           + Sync
+    + Send
+    + Sync
     where
         InSvc: uxum::reexport::tower::Service<
                 http::Request<axum::body::Body>,
@@ -260,14 +260,14 @@ impl IntoResponse for GetRandomError {
 
 impl GetResponseSchemas for GetRandomError {
     type ResponseIter = [ResponseSchema; 1];
-    fn get_response_schemas(gen: &mut schemars::gen::SchemaGenerator) -> Self::ResponseIter {
+    fn get_response_schemas(r#gen: &mut schemars::r#gen::SchemaGenerator) -> Self::ResponseIter {
         [ResponseSchema {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             response: openapi3::Response {
                 description: "Error response".into(),
                 content: okapi::map! {
                     mime::APPLICATION_JSON.to_string() => openapi3::MediaType {
-                        schema: Some(gen.subschema_for::<Self>().into_object()),
+                        schema: Some(r#gen.subschema_for::<Self>().into_object()),
                         ..Default::default()
                     },
                 },
@@ -299,8 +299,8 @@ mod counter_state {
     use std::{
         ops::Deref,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -364,7 +364,7 @@ mod counter_state {
 mod hello {
     use uxum::reexport::{
         bytes::Bytes,
-        opentelemetry::{global, metrics::Counter, KeyValue},
+        opentelemetry::{KeyValue, global, metrics::Counter},
     };
 
     use super::*;
@@ -466,11 +466,10 @@ mod hello {
 
         pub use advanced_server::hello_service_server::HelloServiceServer;
         use advanced_server::{
-            hello_service_server::HelloService, SayHelloRequest, SayHelloResponse,
+            SayHelloRequest, SayHelloResponse, hello_service_server::HelloService,
         };
         use tonic::{Request, Response, Status};
-        use uxum::reexport::opentelemetry::KeyValue;
-        use uxum::AdditionalMetricLabels;
+        use uxum::{AdditionalMetricLabels, reexport::opentelemetry::KeyValue};
 
         #[derive(Debug)]
         pub struct Hello;
@@ -531,7 +530,7 @@ mod distributed_tracing {
     // I didn't bother to provide correct schema here.
     impl GetResponseSchemas for CallInnerError {
         type ResponseIter = [ResponseSchema; 1];
-        fn get_response_schemas(_gen: &mut schemars::gen::SchemaGenerator) -> Self::ResponseIter {
+        fn get_response_schemas(_gen: &mut schemars::r#gen::SchemaGenerator) -> Self::ResponseIter {
             [ResponseSchema {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 response: openapi3::Response {
