@@ -97,9 +97,11 @@ smartstring = "1.0"
 socket2 = { version = "=0.6.4", features = ["all"] }
 spiffe = { version = "0.16", features = ["tracing"], optional = true }
 spiffe-rustls = { version = "0.7", default-features = false, features = ["aws-lc-rs", "parking-lot"], optional = true }
+spiffe-rustls-tokio = { version = "0.4", optional = true }
 thiserror = "2.0"
 tonic = { version = "0.14", features = ["tls-native-roots"], optional = true }
 tokio = { version = "1.44", features = ["full"] }
+tokio-rustls = { version = "0.26", optional = true }
 tokio-util = "0.7"
 tower = { version = "0.5", features = ["buffer", "filter", "limit", "retry", "timeout", "util"] }
 tower-http = { version = "0.6", features = ["catch-panic", "cors", "request-id", "sensitive-headers", "set-header", "trace", "util"] }
@@ -127,7 +129,7 @@ hash_scrypt = ["dep:scrypt"]
 hash_all = ["hash_argon2", "hash_pbkdf2", "hash_scrypt"]
 jwt = ["dep:jsonwebtoken"]
 kafka = ["dep:rdkafka"]
-spiffe = ["dep:spiffe", "dep:spiffe-rustls"]
+spiffe = ["dep:spiffe", "dep:spiffe-rustls", "dep:spiffe-rustls-tokio", "dep:tokio-rustls"]
 systemd = ["dep:libsystemd"]
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -10,6 +10,8 @@ mod user;
 
 #[cfg(feature = "jwt")]
 pub use self::extractor::JwtAuthExtractor;
+#[cfg(feature = "spiffe")]
+pub use self::extractor::SpiffeAuthExtractor;
 pub use self::{
     config::{AuthConfig, ExtractorConfig, ProviderConfig, RoleConfig, UserConfig, UserPassword},
     errors::{AuthError, AuthSetupError},

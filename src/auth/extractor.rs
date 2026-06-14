@@ -21,6 +21,8 @@ use jsonwebtoken as jwt;
 use okapi::{Map, openapi3};
 #[cfg(feature = "jwt")]
 use serde_json::Value;
+#[cfg(feature = "spiffe")]
+use spiffe_rustls_tokio::PeerIdentity;
 use tracing::error;
 
 use crate::{
@@ -461,6 +463,38 @@ impl JwtAuthExtractor {
     /// See [`jsonwebtoken::Validation`].
     pub fn set_validation(&mut self, valid: jwt::Validation) {
         self.validation = valid;
+    }
+}
+
+/// Authentication extractor (front-end) for SPIFFE X.509 SVIDs.
+#[cfg(feature = "spiffe")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpiffeAuthExtractor;
+
+#[cfg(feature = "spiffe")]
+impl AuthExtractor for SpiffeAuthExtractor {
+    fn extract_auth(&self, req: &Request<Body>) -> Result<(Option<UserId>, AuthToken), AuthError> {
+        match req.extensions().get::<PeerIdentity>() {
+            Some(ident) => match ident.spiffe_id() {
+                Some(sid) => Ok((Some(sid.to_string().into()), AuthToken::ExternallyVerified)),
+                None => Err(AuthError::NoAuthProvided),
+            },
+            None => Err(AuthError::NoAuthProvided),
+        }
+    }
+
+    fn error_response(&self, err: AuthError) -> Response<Body> {
+        let status = match err {
+            AuthError::NoAuthProvided
+            | AuthError::UserNotFound
+            | AuthError::AuthFailed
+            | AuthError::NoPermission(_) => StatusCode::FORBIDDEN,
+            _ => StatusCode::BAD_REQUEST,
+        };
+        problemdetails::new(status)
+            .with_type(errors::TAG_UXUM_AUTH)
+            .with_title(err.to_string())
+            .into_response()
     }
 }
 

@@ -22,7 +22,7 @@ use crate::errors::IoError;
 #[cfg(feature = "spiffe")]
 use crate::{
     metrics::SpiffeMetrics,
-    spiffe::{SpiffeConfig, SpiffeError},
+    spiffe::{SpiffeAcceptor, SpiffeConfig, SpiffeError},
 };
 
 /// Error type returned by server builder.
@@ -240,13 +240,15 @@ impl ServerBuilder {
         self,
         spiffe_config: &SpiffeConfig,
         metrics: Option<SpiffeMetrics>,
-    ) -> Result<AxumServer<SocketAddr, RustlsAcceptor>, ServerBuilderError> {
+    ) -> Result<AxumServer<SocketAddr, SpiffeAcceptor>, ServerBuilderError> {
         let span = debug_span!("build_spiffe_server");
         async move {
             let listener = self.create_listener(&self.listen).await?;
             let rustls_config = spiffe_config.rustls_config(metrics).await?;
-            let mut server = axum_server::from_tcp_rustls(listener, rustls_config)
-                .map_err(|err| ServerBuilderError::BuildServer(err.into()))?;
+            let acceptor = SpiffeAcceptor::from(RustlsAcceptor::new(rustls_config));
+            let mut server = axum_server::from_tcp(listener)
+                .map_err(|err| ServerBuilderError::BuildServer(err.into()))?
+                .acceptor(acceptor);
 
             let builder = server.http_builder();
             self.configure_http1(builder);

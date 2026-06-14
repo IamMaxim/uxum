@@ -21,6 +21,8 @@ use subtle::ConstantTimeEq;
 
 #[cfg(feature = "jwt")]
 use crate::auth::extractor::JwtAuthExtractor;
+#[cfg(feature = "spiffe")]
+use crate::auth::extractor::SpiffeAuthExtractor;
 use crate::auth::{
     errors::AuthSetupError,
     extractor::{
@@ -152,6 +154,9 @@ pub enum ExtractorConfig {
         #[serde(default)]
         validate: JwtValidation,
     },
+    /// Extract credentials from SPIFFE X.509 SVID.
+    #[cfg(feature = "spiffe")]
+    Spiffe,
     /// Use several extractors, trying each one in sequence until there is success.
     Stacked {
         /// Contents of the extractor stack.
@@ -188,6 +193,8 @@ impl ExtractorConfig {
                 key.to_key()?,
                 validate.to_validation(*algo),
             ))),
+            #[cfg(feature = "spiffe")]
+            Self::Spiffe => Ok(Box::new(SpiffeAuthExtractor)),
             Self::Stacked { extractors } => {
                 let extractors = extractors
                     .iter()

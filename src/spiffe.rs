@@ -1,14 +1,27 @@
 //! SPIFFE authentication and authorization support.
 
-use std::{collections::BTreeSet, env, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet, env, io, num::NonZeroUsize, ops::Deref, sync::Arc, time::Duration,
+};
 
-use axum_server::tls_rustls::RustlsConfig;
+use axum::{Extension, middleware::AddExtension};
+use axum_server::{
+    accept::{Accept, DefaultAcceptor},
+    tls_rustls::{RustlsAcceptor, RustlsConfig},
+};
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use spiffe::{SpiffeIdError, X509ResourceLimits, X509Source, X509SourceError};
+use spiffe::{
+    SpiffeIdError, X509ResourceLimits, X509Source, X509SourceError, cert::error::CertificateError,
+};
 use spiffe_rustls::{
     Error as SpiffeRustlsError, TrustDomain, TrustDomainPolicy, authorizer, mtls_server,
 };
+use spiffe_rustls_tokio::PeerIdentity;
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::server::TlsStream;
+use tower::Layer;
 use url::Url;
 
 use crate::metrics::SpiffeMetrics;
@@ -293,5 +306,67 @@ impl AsRef<[u8]> for TlsAlpnProtocol {
             Self::Http11 => b"http/1.1",
             Self::Http2 => b"h2",
         }
+    }
+}
+
+/// Wrapper over [`axum_server::tls_rustls::RustlsAcceptor`].
+///
+/// Provides extensions to identify connecting SPIFFE workload.
+#[derive(Clone, Debug)]
+pub struct SpiffeAcceptor<A = DefaultAcceptor> {
+    /// Wrapped inner TLS acceptor.
+    inner: RustlsAcceptor<A>,
+}
+
+impl<A> Deref for SpiffeAcceptor<A> {
+    type Target = RustlsAcceptor<A>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<A> From<RustlsAcceptor<A>> for SpiffeAcceptor<A> {
+    fn from(value: RustlsAcceptor<A>) -> Self {
+        Self { inner: value }
+    }
+}
+
+// TODO: streamline SpiffeAcceptor: remove boxing and add custom future.
+impl<A, I, S> Accept<I, S> for SpiffeAcceptor<A>
+where
+    A: Accept<I, S> + Clone + Send + 'static,
+    A::Stream: AsyncRead + AsyncWrite + Unpin + Send,
+    A::Service: Send,
+    A::Future: Send,
+    I: Send + 'static,
+    S: Send + 'static,
+{
+    type Stream = TlsStream<A::Stream>;
+    type Service = AddExtension<A::Service, PeerIdentity>;
+    type Future = BoxFuture<'static, io::Result<(Self::Stream, Self::Service)>>;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        let acceptor = self.inner.clone();
+
+        Box::pin(async move {
+            let (stream, service) = acceptor.accept(stream, service).await?;
+            let (_io, conn) = stream.get_ref();
+            let peer_identity = if let Some([leaf, ..]) = conn.peer_certificates() {
+                match spiffe::cert::spiffe_id_from_der(leaf.as_ref()) {
+                    Ok(spiffe_id) => PeerIdentity::new(Some(spiffe_id)),
+                    Err(err) => match err {
+                        CertificateError::MissingSpiffeId | CertificateError::MultipleSpiffeIds => {
+                            PeerIdentity::new(None)
+                        }
+                        _ => return Err(io::Error::new(io::ErrorKind::Other, err.to_string())),
+                    },
+                }
+            } else {
+                PeerIdentity::new(None)
+            };
+            let service = Extension(peer_identity).layer(service);
+            Ok((stream, service))
+        })
     }
 }
