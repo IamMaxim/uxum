@@ -20,6 +20,7 @@ use tokio::{fs::OpenOptions, io::AsyncReadExt};
 #[cfg(feature = "spiffe")]
 use crate::spiffe::SpiffeConfig;
 use crate::{
+    RetryPolicyKind,
     http_client::{
         cb::HttpClientCircuitBreakerConfig, errors::HttpClientError, middleware::wrap_client,
     },
@@ -141,6 +142,13 @@ pub struct HttpClientConfig {
         alias = "circuit_breaker"
     )]
     pub cb: Option<HttpClientCircuitBreakerConfig>,
+    /// Retry configuration.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "retry_config"
+    )]
+    pub retry: Option<RetryPolicyKind>,
     /// List of overrides for domain name resolution.
     ///
     /// Use domain name as key, and a socket address as value.
@@ -172,6 +180,7 @@ impl Default for HttpClientConfig {
             tcp: HttpClientTcpConfig::default(),
             http2: HttpClientHttp2Config::default(),
             cb: None,
+            retry: None,
             domain_overrides: HashMap::new(),
             app_name: None,
             app_version: None,
@@ -322,6 +331,7 @@ impl HttpClientConfig {
             builder.build()?,
             metrics,
             self.cb.as_ref().map(|cb| cb.make_circuit_breaker()),
+            self.retry.as_ref(),
         ))
     }
 

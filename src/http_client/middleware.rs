@@ -6,7 +6,10 @@ use reqwest::{Client, Request, Response};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next, Result};
 
 use crate::{
-    http_client::{CircuitBreakerMiddleware, MetricsMiddleware, TracingMiddleware},
+    http_client::{
+        BaseRetryMiddleware, CircuitBreakerMiddleware, ExponentialRetryMiddleware,
+        MetricsMiddleware, RetryPolicyKind, TracingMiddleware,
+    },
     layers::{
         request_id::{CURRENT_REQUEST_ID, X_REQUEST_ID},
         timeout::{CURRENT_DEADLINE, X_TIMEOUT},
@@ -53,15 +56,27 @@ pub(crate) fn wrap_client(
     client: Client,
     metrics: Option<ClientMetricsState>,
     cb: Option<AsyncRecloser>,
+    retry_policy: Option<&RetryPolicyKind>, // fixme
 ) -> ClientWithMiddleware {
     let mut builder = ClientBuilder::new(client)
         .with(HeaderPropagationMiddleware)
         .with(TracingMiddleware::new());
+
     if let Some(metrics) = metrics {
         builder = builder.with(MetricsMiddleware::from(metrics));
     }
     if let Some(cb) = cb {
         builder = builder.with(CircuitBreakerMiddleware::from(cb));
+    }
+    if let Some(policy) = retry_policy {
+        match policy {
+            RetryPolicyKind::Base(base) => {
+                builder = builder.with(BaseRetryMiddleware::from(base.clone()));
+            }
+            RetryPolicyKind::Exponential(exp) => {
+                builder = builder.with(ExponentialRetryMiddleware::from(exp.clone()));
+            }
+        }
     }
     builder.build()
 }
