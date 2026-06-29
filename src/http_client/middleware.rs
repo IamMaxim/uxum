@@ -56,7 +56,7 @@ pub(crate) fn wrap_client(
     client: Client,
     metrics: Option<ClientMetricsState>,
     cb: Option<AsyncRecloser>,
-    retry_policy: Option<&RetryPolicyKind>, // fixme
+    retry_policy: Option<&RetryPolicyKind>,
 ) -> ClientWithMiddleware {
     let mut builder = ClientBuilder::new(client)
         .with(HeaderPropagationMiddleware)
