@@ -1,4 +1,5 @@
 //! Retry config, strategy and middleware for using on `HttpClient` side
+use std::num::NonZeroU32;
 use reqwest_retry::{DefaultRetryableStrategy, RetryTransientMiddleware};
 use retry_policies::RetryDecision;
 use retry_policies::policies::ExponentialBackoff;
@@ -22,8 +23,8 @@ pub enum RetryPolicyKind {
 pub struct BaseBackoffPolicy {
     /// Number of attempts to retry failed request
     #[serde(alias = "attempts")]
-    max_attempts: u32,
-    /// Backoff duration in seconds
+    max_attempts: NonZeroU32,
+    /// Backoff duration
     #[serde(alias = "duration", with = "humantime_serde")]
     backoff_duration: Duration,
 }
@@ -34,18 +35,18 @@ pub struct BaseBackoffPolicy {
 pub struct ExponentialBackoffPolicy {
     /// Number of attempts to retry failed request
     #[serde(alias = "attempts")]
-    max_attempts: u32,
-    /// Min backoff duration in seconds
+    max_attempts: NonZeroU32,
+    /// Min backoff duration
     #[serde(alias = "min_duration", with = "humantime_serde")]
     min_backoff_duration: Duration,
-    /// Max backoff duration in seconds
+    /// Max backoff duration
     #[serde(alias = "max_duration", with = "humantime_serde")]
     max_backoff_duration: Duration,
 }
 
 impl retry_policies::RetryPolicy for BaseBackoffPolicy {
     fn should_retry(&self, _req_start_time: SystemTime, n_past_retries: u32) -> RetryDecision {
-        if n_past_retries < self.max_attempts {
+        if n_past_retries < self.max_attempts.into() {
             return RetryDecision::Retry {
                 execute_after: SystemTime::now() + self.backoff_duration,
             };
@@ -74,7 +75,7 @@ impl From<ExponentialBackoffPolicy> for ExponentialRetryMiddleware {
     fn from(policy: ExponentialBackoffPolicy) -> Self {
         let policy = ExponentialBackoff::builder()
             .retry_bounds(policy.min_backoff_duration, policy.max_backoff_duration)
-            .build_with_max_retries(policy.max_attempts);
+            .build_with_max_retries(policy.max_attempts.into());
         RetryTransientMiddleware::new_with_policy(policy)
     }
 }
@@ -94,7 +95,7 @@ mod tests {
             }
         }"#,
         RetryPolicyKind::Base(BaseBackoffPolicy {
-            max_attempts: 5,
+            max_attempts: NonZeroU32::new(5).unwrap(),
             backoff_duration: Duration::from_secs(3)})
     )]
     #[case(
@@ -105,7 +106,7 @@ mod tests {
             }
         }"#,
         RetryPolicyKind::Base(BaseBackoffPolicy {
-            max_attempts: 5,
+            max_attempts: NonZeroU32::new(5).unwrap(),
             backoff_duration: Duration::from_secs(3)})
     )]
     #[case(
@@ -117,7 +118,7 @@ mod tests {
             }
         }"#,
         RetryPolicyKind::Exponential(ExponentialBackoffPolicy {
-            max_attempts: 5,
+            max_attempts: NonZeroU32::new(5).unwrap(),
             min_backoff_duration: Duration::from_secs(1),
             max_backoff_duration: Duration::from_secs(3)})
     )]
@@ -130,7 +131,7 @@ mod tests {
             }
         }"#,
         RetryPolicyKind::Exponential(ExponentialBackoffPolicy {
-            max_attempts: 5,
+            max_attempts: NonZeroU32::new(5).unwrap(),
             min_backoff_duration: Duration::from_secs(1),
             max_backoff_duration: Duration::from_secs(3)})
     )]
@@ -151,7 +152,16 @@ mod tests {
                 "backoff_duration": "2s"
             }
         }"#,
-        "invalid value: integer `-1`, expected u32"
+        "invalid value: integer `-1`, expected a nonzero u32"
+    )]
+    #[case(
+        r#"{
+            "backoff_policy": {
+                "max_attempts": 0,
+                "backoff_duration": "2s"
+            }
+        }"#,
+        "invalid value: integer `0`, expected a nonzero u32"
     )]
     #[case(
         r#"{
@@ -170,7 +180,17 @@ mod tests {
                 "max_backoff_duration": "3s"
             }
         }"#,
-        "invalid value: integer `-1`, expected u32"
+        "invalid value: integer `-1`, expected a nonzero u32"
+    )]
+    #[case(
+        r#"{
+            "exponential_backoff_policy": {
+                "max_attempts": 0,
+                "min_backoff_duration": "2s",
+                "max_backoff_duration": "3s"
+            }
+        }"#,
+        "invalid value: integer `0`, expected a nonzero u32"
     )]
     #[case(
         r#"{
