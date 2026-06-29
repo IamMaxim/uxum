@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime};
 
 /// HTTP client retry policy kind (base or exponential)
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RetryPolicyKind {
     /// Base backoff policy for retry
@@ -20,6 +21,7 @@ pub enum RetryPolicyKind {
 
 /// HTTP client retry policy with fixed interval between attempts
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub struct FixedIntervalPolicy {
     /// Number of attempts to retry failed request
@@ -32,6 +34,7 @@ pub struct FixedIntervalPolicy {
 
 /// HTTP client retry policy with exponential backoff
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub struct ExponentialBackoffPolicy {
     /// Number of attempts to retry failed request
