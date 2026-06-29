@@ -70,11 +70,11 @@ pub(crate) fn wrap_client(
     }
     if let Some(policy) = retry_policy {
         match policy {
-            RetryPolicyKind::Base(base) => {
-                builder = builder.with(BaseRetryMiddleware::from(base.clone()));
+            RetryPolicyKind::FixedInterval(v) => {
+                builder = builder.with(BaseRetryMiddleware::from(v.clone()));
             }
-            RetryPolicyKind::Exponential(exp) => {
-                builder = builder.with(ExponentialRetryMiddleware::from(exp.clone()));
+            RetryPolicyKind::ExponentialBackoff(v) => {
+                builder = builder.with(ExponentialRetryMiddleware::from(v.clone()));
             }
         }
     }

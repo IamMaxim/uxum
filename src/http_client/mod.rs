@@ -16,8 +16,8 @@ pub use self::{
     errors::HttpClientError,
     metrics::MetricsMiddleware,
     retry::{
-        BaseBackoffPolicy, BaseRetryMiddleware, ExponentialBackoffPolicy,
-        ExponentialRetryMiddleware, RetryPolicyKind,
+        BaseRetryMiddleware, ExponentialBackoffPolicy, ExponentialRetryMiddleware,
+        FixedIntervalPolicy, RetryPolicyKind,
     },
     tracing::{DisableOtelPropagation, TracingMiddleware},
 };
