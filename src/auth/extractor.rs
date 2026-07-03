@@ -28,6 +28,7 @@ use tracing::error;
 use crate::{
     auth::{errors::AuthError, token::AuthToken, user::UserId},
     errors,
+    util::str::escape_http_quoted,
 };
 
 /// Authentication extractor (front-end) trait.
@@ -161,11 +162,10 @@ impl BasicAuthExtractor {
 
     /// Format value of `WWW-Authenticate` header.
     fn format_www_authenticate(realm: impl AsRef<str>) -> String {
-        // TODO: escape realm
         format!(
             r#"{} realm="{}", charset="UTF-8""#,
             Self::SCHEME,
-            realm.as_ref()
+            escape_http_quoted(realm.as_ref())
         )
     }
 
@@ -409,11 +409,10 @@ impl JwtAuthExtractor {
 
     /// Format value of `WWW-Authenticate` header.
     fn format_www_authenticate(realm: impl AsRef<str>) -> String {
-        // TODO: escape realm
         format!(
             r#"{} realm="{}", charset="UTF-8""#,
             Self::SCHEME,
-            realm.as_ref()
+            escape_http_quoted(realm.as_ref())
         )
     }
 

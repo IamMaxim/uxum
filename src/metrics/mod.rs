@@ -32,6 +32,7 @@ use opentelemetry_sdk::{
     Resource,
     metrics::{SdkMeterProvider, Temporality},
 };
+use opentelemetry_semantic_conventions::attribute as attr;
 use opentelemetry_stdout::MetricExporter as StdoutMetricExporter;
 use pin_project::pin_project;
 use serde::{Deserialize, Serialize};
@@ -46,7 +47,7 @@ use url::Url;
 use crate::{
     crypto::TonicTlsConfig,
     errors::{self, IoError},
-    layers::ext::HandlerName,
+    layers::ext::{HandlerName, ListenerInfo},
     metrics::text_exporter::{PrometheusExporter, ResourceSelector},
     telemetry::OtlpProtocol,
 };
@@ -385,10 +386,28 @@ impl MetricsBuilder {
             .u64_gauge("runtime.global_queue_depth")
             .with_description("Number of tasks currently scheduled in the runtime’s global queue.")
             .build();
+        let worker_busy_duration = meter
+            .f64_gauge("runtime.worker.total_busy_duration")
+            .with_unit("s")
+            .with_description("Total runtime worker busy time in seconds.")
+            .build();
+        let worker_park_count = meter
+            .u64_gauge("runtime.worker.park_count")
+            .with_description("Total number of times the given worker thread has been parked.")
+            .build();
+        let worker_park_unpark_count = meter
+            .u64_gauge("runtime.worker.park_unpark_count")
+            .with_description(
+                "Total number of times the given worker thread has been parked or unparked.",
+            )
+            .build();
         let runtime = RuntimeMetrics {
             num_workers,
             num_alive_tasks,
             global_queue_depth,
+            worker_busy_duration,
+            worker_park_count,
+            worker_park_unpark_count,
         };
 
         MetricsState {
@@ -797,6 +816,35 @@ pub(crate) struct RuntimeMetrics {
     /// global queue. This metric returns the current number of tasks pending in the global queue.
     /// As such, the returned value may increase or decrease as new tasks are scheduled and processed.
     global_queue_depth: Gauge<u64>,
+    /// Amount of time the given worker thread has been busy.
+    ///
+    /// The worker busy duration starts at zero when the runtime is created and increases whenever
+    /// the worker is spending time processing work. Using this value can indicate the load of
+    /// the given worker. If a lot of time is spent busy, then the worker is under load and will check
+    /// for inbound events less often.
+    ///
+    /// The timer is monotonically increasing. It is never decremented or reset to zero.
+    worker_busy_duration: Gauge<f64>,
+    /// Total number of times the given worker thread has parked.
+    ///
+    /// The worker park count starts at zero when the runtime is created and increases by one each time
+    /// the worker parks the thread waiting for new inbound events to process. This usually means
+    /// the worker has processed all pending work and is currently idle.
+    ///
+    /// The counter is monotonically increasing. It is never decremented or reset to zero.
+    worker_park_count: Gauge<u64>,
+    /// Total number of times the given worker thread has parked and unparked.
+    ///
+    /// The worker park/unpark count starts at zero when the runtime is created and increases by one
+    /// each time the worker parks the thread waiting for new inbound events to process. This usually
+    /// means the worker has processed all pending work and is currently idle. When new work becomes
+    /// available, the worker is unparked and the park/unpark count is again increased by one.
+    ///
+    /// An odd count means that the worker is currently parked. An even count means that the worker
+    /// is currently active.
+    ///
+    /// The counter is monotonically increasing. It is never decremented or reset to zero.
+    worker_park_unpark_count: Gauge<u64>,
 }
 
 impl<S> Layer<S> for MetricsState {
@@ -899,25 +947,25 @@ where
     fn call(&mut self, req: Request<T>) -> Self::Future {
         let start = Instant::now();
         let ext = req.extensions();
+        let li = ext.get::<ListenerInfo>();
         let method = req.method().clone();
-        // TODO: fix once https://github.com/tokio-rs/axum/issues/2504 is released.
-        let scheme = match req.uri().scheme() {
-            Some(sch) => sch.to_string(),
-            None => String::new(),
-        };
+        let scheme = li.map(|i| i.protocol.as_scheme()).unwrap_or("");
+        let port = li.map(|i| i.local_addr.port()).unwrap_or(0) as i64;
         let path = ext.get::<MatchedPath>().cloned();
         let request_size = req.size_hint().upper().unwrap_or_default();
         self.state.http_server.requests_active.add(
             1,
             &[
-                KeyValue::new("http.request.method", method.to_string()),
-                KeyValue::new("url.scheme", scheme.clone()),
+                KeyValue::new(attr::HTTP_REQUEST_METHOD, method.to_string()),
+                KeyValue::new(attr::URL_SCHEME, scheme),
+                KeyValue::new(attr::SERVER_PORT, port),
             ],
         );
         HttpMetricsFuture {
             inner: self.inner.call(req),
             state: self.state.clone(),
             start,
+            port,
             method,
             scheme,
             path,
@@ -937,10 +985,12 @@ pub struct HttpMetricsFuture<F> {
     state: MetricsState,
     /// Request processing beginning timestamp.
     start: Instant,
+    /// HTTP server port.
+    port: i64,
     /// HTTP request method.
     method: Method,
     /// HTTP URI scheme.
-    scheme: String,
+    scheme: &'static str,
     /// Matched [`axum`] route.
     path: Option<MatchedPath>,
     /// HTTP request size, in bytes.
@@ -958,10 +1008,13 @@ where
         let this = self.project();
         let resp_result = ready!(this.inner.poll(cx));
 
-        let mut labels = vec![
-            KeyValue::new("http.request.method", this.method.to_string()),
-            KeyValue::new("url.scheme", this.scheme.clone()),
-        ];
+        let mut labels = Vec::with_capacity(8);
+        labels.push(KeyValue::new(
+            attr::HTTP_REQUEST_METHOD,
+            this.method.to_string(),
+        ));
+        labels.push(KeyValue::new(attr::URL_SCHEME, *this.scheme));
+        labels.push(KeyValue::new(attr::SERVER_PORT, *this.port));
 
         this.state.http_server.requests_active.add(-1, &labels);
 
@@ -973,7 +1026,7 @@ where
 
         labels.push(KeyValue::new("http.response.status_code", status));
         labels.push(KeyValue::new(
-            "http.route",
+            attr::HTTP_ROUTE,
             this.path.as_ref().map_or(Cow::Borrowed(""), |path| {
                 Cow::Owned(path.as_str().to_owned())
             }),
@@ -983,7 +1036,6 @@ where
             handler.map_or("", |hdl| hdl.as_str()),
         ));
         // server.address?
-        // server.port?
         // network.protocol.name?
         // network.protocol.version?
         #[cfg(feature = "grpc")]
@@ -995,6 +1047,8 @@ where
                 .unwrap_or("http");
 
             if content_type.starts_with("application/grpc") {
+                // TODO: use proper "rpc.response.status_code" with text names of statuses
+                //       as per OpenTelemetry conventions.
                 let grpc_status_code = headers
                     .get("grpc-status")
                     // return status code INTERNAL instead of panicking
@@ -1033,6 +1087,8 @@ where
 }
 
 /// Periodic task to record Tokio runtime metrics.
+///
+/// Spawned as a task when creating uxum handle (see [`crate::AppConfig::handle`]).
 pub(crate) async fn gather_runtime_metrics(
     metrics: MetricsState,
     period: Duration,
@@ -1046,10 +1102,11 @@ pub(crate) async fn gather_runtime_metrics(
             _ = cancel.cancelled() => break,
             _ = interval.tick() => {
                 let rt_metrics = tokio::runtime::Handle::current().metrics();
+                let num_workers = rt_metrics.num_workers();
                 metrics
                     .runtime
                     .num_workers
-                    .record(rt_metrics.num_workers() as u64, &[]);
+                    .record(num_workers as u64, &[]);
                 metrics
                     .runtime
                     .num_alive_tasks
@@ -1058,6 +1115,21 @@ pub(crate) async fn gather_runtime_metrics(
                     .runtime
                     .global_queue_depth
                     .record(rt_metrics.global_queue_depth() as u64, &[]);
+                for worker in 0..num_workers {
+                    let kv = [KeyValue::new("runtime.worker", worker as i64)];
+                    metrics
+                        .runtime
+                        .worker_busy_duration
+                        .record(rt_metrics.worker_total_busy_duration(worker).as_secs_f64(), &kv);
+                    metrics
+                        .runtime
+                        .worker_park_count
+                        .record(rt_metrics.worker_park_count(worker), &kv);
+                    metrics
+                        .runtime
+                        .worker_park_unpark_count
+                        .record(rt_metrics.worker_park_unpark_count(worker), &kv);
+                }
             }
         }
     }

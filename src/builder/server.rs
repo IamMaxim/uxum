@@ -1,29 +1,36 @@
 //! Server builder.
 
 use std::{
+    fmt, io,
     net::{SocketAddr, TcpListener},
     num::{NonZeroU32, NonZeroUsize},
-    path::Path,
+    ops::Deref,
+    pin::Pin,
+    task::{Context, Poll, ready},
     time::Duration,
 };
 
+use axum::{Extension, middleware::AddExtension};
 use axum_server::{
     Server as AxumServer,
-    tls_rustls::{RustlsAcceptor, RustlsConfig},
+    accept::{Accept, DefaultAcceptor},
 };
 use hyper_util::server::conn::auto::Builder;
+use pin_project::pin_project;
+use rustls_pki_types::pem::Error as PemError;
 use serde::{Deserialize, Serialize};
 use socket2::SockRef;
 use thiserror::Error;
-use tokio::net::{TcpSocket, ToSocketAddrs, lookup_host};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::{TcpSocket, ToSocketAddrs, lookup_host},
+};
+use tower::Layer;
 use tracing::{Instrument, debug, debug_span, info};
 
-use crate::errors::IoError;
 #[cfg(feature = "spiffe")]
-use crate::{
-    metrics::SpiffeMetrics,
-    spiffe::{SpiffeAcceptor, SpiffeConfig, SpiffeError},
-};
+use crate::spiffe::{SpiffeConfig, SpiffeError};
+use crate::{errors::IoError, layers::ext::ListenerInfo, tls::TlsConfig};
 
 /// Error type returned by server builder.
 #[derive(Debug, Error)]
@@ -49,7 +56,7 @@ pub enum ServerBuilderError {
     ConvertListener(IoError),
     /// Unable to extract local address.
     #[error("Unable to extract local address: {0}")]
-    ListenerLocalAddr(hyper::Error),
+    ListenerLocalAddr(IoError),
     /// Unable to get socket domain.
     #[error("Unable to get socket domain: {0}")]
     GetDomain(IoError),
@@ -80,9 +87,12 @@ pub enum ServerBuilderError {
     /// TLS configuration error.
     #[error("TLS configuration error: {0}")]
     TlsConfig(IoError),
-    /// No TLS configuration was provided.
-    #[error("No TLS configuration was provided")]
-    NoTlsConfig,
+    /// Unable to parse PEM file.
+    #[error("Unable to parse PEM file: {0}")]
+    PemParse(#[from] PemError),
+    /// RusTLS error.
+    #[error("RusTLS error: {0}")]
+    RusTls(#[from] rustls::Error),
     /// Unable to build server instance.
     #[error("Unable to build server instance: {0}")]
     BuildServer(IoError),
@@ -126,11 +136,6 @@ pub struct ServerBuilder {
     /// Host/address and port to listen on.
     #[serde(default = "ServerBuilder::default_listen")]
     pub listen: String,
-    /// Sleep on accept errors.
-    ///
-    /// Default is false.
-    #[serde(default)]
-    pub sleep_on_accept_errors: bool,
     /// IP-level socket configuration.
     #[serde(default)]
     pub ip: IpConfig,
@@ -150,7 +155,6 @@ impl Default for ServerBuilder {
         Self {
             kind: ServerKind::Plain,
             listen: Self::default_listen(),
-            sleep_on_accept_errors: false,
             ip: IpConfig::default(),
             tcp: TcpConfig::default(),
             http1: Http1Config::default(),
@@ -184,69 +188,15 @@ impl ServerBuilder {
     /// # Errors
     ///
     /// Returns `Err` if builder encounters an error while setting up a listening socket.
-    pub async fn build(self) -> Result<AxumServer<SocketAddr>, ServerBuilderError> {
+    pub async fn build(self) -> Result<AxumServer<SocketAddr, PlainAcceptor>, ServerBuilderError> {
         let span = debug_span!("build_server");
         async move {
             let listener = self.create_listener(&self.listen).await?;
-            let mut server = axum_server::from_tcp(listener)
-                .map_err(|err| ServerBuilderError::BuildServer(err.into()))?;
-
-            let builder = server.http_builder();
-            self.configure_http1(builder);
-            self.configure_http2(builder);
-
-            info!("finished building plain server");
-            Ok(server)
-        }
-        .instrument(span)
-        .await
-    }
-
-    /// Build TLS network server.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if builder encounters an error while setting up a listening socket
-    /// or configuring TLS parameters.
-    pub async fn build_tls(
-        self,
-        tls_config: &TlsConfig,
-    ) -> Result<AxumServer<SocketAddr, RustlsAcceptor>, ServerBuilderError> {
-        let span = debug_span!("build_tls_server");
-        async move {
-            let listener = self.create_listener(&self.listen).await?;
-            let rustls_config = tls_config.rustls_config().await?;
-            let mut server = axum_server::from_tcp_rustls(listener, rustls_config)
-                .map_err(|err| ServerBuilderError::BuildServer(err.into()))?;
-
-            let builder = server.http_builder();
-            self.configure_http1(builder);
-            self.configure_http2(builder);
-
-            info!("finished building TLS server");
-            Ok(server)
-        }
-        .instrument(span)
-        .await
-    }
-
-    /// Build SPIFFE network server.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if builder encounters an error while setting up a listening socket
-    /// or configuring TLS or SPIFFE parameters.
-    #[cfg(feature = "spiffe")]
-    pub async fn build_spiffe(
-        self,
-        spiffe_config: &SpiffeConfig,
-        metrics: Option<SpiffeMetrics>,
-    ) -> Result<AxumServer<SocketAddr, SpiffeAcceptor>, ServerBuilderError> {
-        let span = debug_span!("build_spiffe_server");
-        async move {
-            let listener = self.create_listener(&self.listen).await?;
-            let rustls_config = spiffe_config.rustls_server_config(metrics).await?;
-            let acceptor = SpiffeAcceptor::from(RustlsAcceptor::new(rustls_config));
+            let local_addr = listener
+                .local_addr()
+                .map_err(|err| ServerBuilderError::ListenerLocalAddr(err.into()))?;
+            let listener_info = ListenerInfo::new_http(local_addr);
+            let acceptor = PlainAcceptor::new(DefaultAcceptor::new(), listener_info);
             let mut server = axum_server::from_tcp(listener)
                 .map_err(|err| ServerBuilderError::BuildServer(err.into()))?
                 .acceptor(acceptor);
@@ -255,7 +205,7 @@ impl ServerBuilder {
             self.configure_http1(builder);
             self.configure_http2(builder);
 
-            info!("finished building SPIFFE TLS server");
+            info!("finished building plain server");
             Ok(server)
         }
         .instrument(span)
@@ -362,6 +312,99 @@ impl ServerBuilder {
     }
 }
 
+/// Wrapper over [`axum_server::accept::DefaultAcceptor`].
+///
+/// Adds [`ListenerInfo`]
+#[derive(Clone, Debug)]
+pub struct PlainAcceptor<A = DefaultAcceptor> {
+    /// Wrapped inner acceptor.
+    inner: A,
+    /// Listener information.
+    listener_info: ListenerInfo,
+}
+
+impl<A> PlainAcceptor<A> {
+    /// Create new acceptor by wrapping existing acceptor.
+    pub fn new(inner: A, listener_info: ListenerInfo) -> Self {
+        Self {
+            inner,
+            listener_info,
+        }
+    }
+}
+
+impl<A> Deref for PlainAcceptor<A> {
+    type Target = A;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<A, I, S> Accept<I, S> for PlainAcceptor<A>
+where
+    A: Accept<I, S>,
+    A::Stream: AsyncRead + AsyncWrite + Unpin,
+{
+    type Stream = A::Stream;
+    type Service = AddExtension<A::Service, ListenerInfo>;
+    type Future = ListenerInfoAcceptorFuture<A::Future>;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        let inner = self.inner.accept(stream, service);
+        let listener_info = self.listener_info.clone();
+
+        ListenerInfoAcceptorFuture::new(inner, listener_info)
+    }
+}
+
+/// Acceptor future for basic acceptors.
+///
+/// Adds [`ListenerInfo`] to resulting service.
+#[pin_project]
+pub struct ListenerInfoAcceptorFuture<F> {
+    #[pin]
+    inner: F,
+    listener_info: Option<ListenerInfo>,
+}
+
+impl<F> ListenerInfoAcceptorFuture<F> {
+    /// Construct new future.
+    pub fn new(inner: F, listener_info: ListenerInfo) -> Self {
+        Self {
+            inner,
+            listener_info: Some(listener_info),
+        }
+    }
+}
+
+impl<F> fmt::Debug for ListenerInfoAcceptorFuture<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ListenerInfoAcceptorFuture").finish()
+    }
+}
+
+impl<F, I, S> Future for ListenerInfoAcceptorFuture<F>
+where
+    F: Future<Output = io::Result<(I, S)>>,
+    I: AsyncRead + AsyncWrite + Unpin,
+{
+    type Output = io::Result<(I, AddExtension<S, ListenerInfo>)>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        let inner_res = ready!(this.inner.poll(cx));
+        Poll::Ready(inner_res.and_then(|(stream, service)| {
+            let listener_info = this
+                .listener_info
+                .take()
+                .ok_or_else(|| io::Error::other("no listener info"))?;
+            let service = Extension(listener_info).layer(service);
+            Ok((stream, service))
+        }))
+    }
+}
+
 /// IP-level configuration.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[non_exhaustive]
@@ -376,7 +419,7 @@ pub struct IpConfig {
 #[non_exhaustive]
 pub struct TcpConfig {
     /// Set `TCP_NODELAY` socket options for accepted connections.
-    #[serde(default = "crate::util::default_true")]
+    #[serde(default = "crate::util::default_true", alias = "no_delay")]
     pub nodelay: bool,
     /// Size of TCP receive buffer, in bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -546,31 +589,6 @@ pub struct Http2KeepaliveConfig {
         with = "humantime_serde"
     )]
     pub timeout: Option<Duration>,
-}
-
-/// TLS configuration.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[non_exhaustive]
-pub struct TlsConfig {
-    /// Path to certificate or certificate chain in PEM format.
-    #[serde(alias = "cert", alias = "chain")]
-    certificate: Box<Path>,
-    /// Path to private key file in PEM format.
-    #[serde(alias = "key")]
-    private_key: Box<Path>,
-}
-
-impl TlsConfig {
-    /// Generate configuration object for RusTLS.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if provided TLS configuration is invalid.
-    pub async fn rustls_config(&self) -> Result<RustlsConfig, ServerBuilderError> {
-        RustlsConfig::from_pem_chain_file(&self.certificate, &self.private_key)
-            .await
-            .map_err(|err| ServerBuilderError::TlsConfig(err.into()))
-    }
 }
 
 /// Turn DNS name or address into a socket.

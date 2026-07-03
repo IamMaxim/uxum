@@ -4,6 +4,7 @@ use std::{
     borrow::{Borrow, BorrowMut},
     fmt,
     hash::Hash,
+    net::SocketAddr,
     ops::{Deref, DerefMut},
     time::{Duration, Instant},
 };
@@ -148,5 +149,81 @@ impl fmt::Display for Deadline {
             "{}s left",
             self.time_left().unwrap_or_default().as_secs_f64()
         )
+    }
+}
+
+/// Describes listener's protocol and its features.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListenerProtocol {
+    /// Plain HTTP over TCP.
+    Http,
+    /// HTTP over TLS over TCP using static preconfigured certificates.
+    HttpsTls,
+    /// HTTP over TLS over TCP using SPIFFE-distributed certificates.
+    #[cfg(feature = "spiffe")]
+    HttpsSpiffe,
+    /// QUIC over UDP using static preconfigured certificates.
+    Quic,
+}
+
+impl ListenerProtocol {
+    /// Get URL scheme formatted as OpenTelemetry attribute value.
+    pub fn as_scheme(&self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::HttpsTls | Self::HttpsSpiffe | Self::Quic => "https",
+        }
+    }
+
+    /// Get transport protocol formatted as OpenTelemetry attribute value.
+    pub fn as_transport(&self) -> &'static str {
+        match self {
+            Self::Quic => "udp",
+            _ => "tcp",
+        }
+    }
+}
+
+/// This structure is registered as an extension for every request via a custom acceptor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListenerInfo {
+    /// Listener protocol.
+    pub protocol: ListenerProtocol,
+    /// Local listening address and port, if applicable.
+    pub local_addr: SocketAddr,
+}
+
+impl ListenerInfo {
+    /// Create listener info object for plain HTTP over TCP.
+    pub fn new_http(local_addr: SocketAddr) -> Self {
+        Self {
+            protocol: ListenerProtocol::Http,
+            local_addr,
+        }
+    }
+
+    /// Create listener info object for HTTP over TLS over TCP.
+    pub fn new_tls(local_addr: SocketAddr) -> Self {
+        Self {
+            protocol: ListenerProtocol::HttpsTls,
+            local_addr,
+        }
+    }
+
+    /// Create listener info object for HTTP over SPIFFE/TLS over TCP.
+    #[cfg(feature = "spiffe")]
+    pub fn new_spiffe(local_addr: SocketAddr) -> Self {
+        Self {
+            protocol: ListenerProtocol::HttpsSpiffe,
+            local_addr,
+        }
+    }
+
+    /// Create listener info object for QUIC over UDP.
+    pub fn new_quic(local_addr: SocketAddr) -> Self {
+        Self {
+            protocol: ListenerProtocol::Quic,
+            local_addr,
+        }
     }
 }

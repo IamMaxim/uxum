@@ -405,10 +405,26 @@ impl AppConfig {
     /// error.
     pub async fn handle(&mut self) -> Result<Handle, HandleError> {
         let token = CancellationToken::new();
-        let (registry, buf_guards) = self.logging.make_registry()?;
         let otel_res = self.otel_resource();
+        let (metrics, metrics_provider, rt_metrics_task) = if let Some(mcfg) = self.metrics.as_ref()
+        {
+            let (metrics_provider, prom_exporter) = mcfg.build_provider(otel_res.clone()).await?;
+            let meter = metrics_provider.meter("uxum");
+            let metrics_state = mcfg.build_state(&meter, prom_exporter);
+            let rt_task = tokio::spawn(gather_runtime_metrics(
+                metrics_state.clone(),
+                mcfg.runtime_metrics_interval,
+                token.clone(),
+            ));
+            self.metrics_state = Some(metrics_state.clone());
+            opentelemetry::global::set_meter_provider(metrics_provider.clone());
+            (Some(metrics_state), Some(metrics_provider), Some(rt_task))
+        } else {
+            (None, None, None)
+        };
+        let (registry, buf_guards) = self.logging.make_registry(metrics.as_ref()).await?;
         let (tracer, tracer_provider) = if let Some(tcfg) = self.tracing.as_mut() {
-            let tracer_provider = tcfg.build_provider(otel_res.clone()).await?;
+            let tracer_provider = tcfg.build_provider(otel_res).await?;
             let tracer = tracer_provider.tracer("uxum");
             let layer = tcfg.build_layer(&tracer);
             registry
@@ -422,22 +438,6 @@ impl AppConfig {
         } else {
             registry.init();
             (None, None)
-        };
-        let (metrics, metrics_provider, rt_metrics_task) = if let Some(mcfg) = self.metrics.as_ref()
-        {
-            let (metrics_provider, prom_exporter) = mcfg.build_provider(otel_res).await?;
-            let meter = metrics_provider.meter("uxum");
-            let metrics_state = mcfg.build_state(&meter, prom_exporter);
-            let rt_task = tokio::spawn(gather_runtime_metrics(
-                metrics_state.clone(),
-                mcfg.runtime_metrics_interval,
-                token.clone(),
-            ));
-            self.metrics_state = Some(metrics_state.clone());
-            opentelemetry::global::set_meter_provider(metrics_provider.clone());
-            (Some(metrics_state), Some(metrics_provider), Some(rt_task))
-        } else {
-            (None, None, None)
         };
         let handle = AxumHandle::new();
         let notify = ServiceNotifier::new();
