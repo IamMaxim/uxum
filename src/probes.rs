@@ -214,7 +214,7 @@ impl<B> ProbeStateInner<B> {
 
     /// Aggregate liveness over the watchdog and all health sources.
     pub(crate) fn is_alive(&self) -> bool {
-        self.watchdog.as_ref().map_or(true, Watchdog::is_alive)
+        self.watchdog.as_ref().is_none_or(Watchdog::is_alive)
             && self.health_sources.iter().all(|src| src.is_alive())
     }
 }

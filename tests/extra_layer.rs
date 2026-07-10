@@ -1,12 +1,12 @@
-//! PR1: a tracing-subscriber layer injected via `AppConfig::with_subscriber_layer`
+//! A tracing-subscriber layer injected via `AppConfig::with_subscriber_layer`
 //! observes events emitted after the registry is initialized.
 
 use std::sync::{Arc, Mutex};
 
 use tracing::Subscriber;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 use uxum::AppConfig;
 
 /// Records the target of each event it sees.
