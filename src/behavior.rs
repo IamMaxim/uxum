@@ -7,10 +7,20 @@ use axum::{
     body::{Body, HttpBody},
     http::{Request, Response, StatusCode},
     response::IntoResponse,
+    routing::MethodRouter,
 };
 use tower::{Layer, Service, layer::util::Identity};
+use tracing::error;
+
+use crate::{
+    errors,
+    layers::{rate::RateLimitError, timeout::TimeoutError},
+};
 
 /// Trait for customizing behaviors within [`crate::AppBuilder`].
+///
+/// Any trait element has a default implementation. You should implement only ones that
+/// you need changed.
 pub trait AppBehavior: Clone + Send + Sync + 'static {
     /// Customizable global layer for all handler services.
     fn layer<InSvc, InResp>(
@@ -50,6 +60,26 @@ pub trait AppBehavior: Clone + Send + Sync + 'static {
     fn liveness_probe(&self) -> impl Future<Output = impl IntoResponse> + Send {
         async { StatusCode::OK }
     }
+
+    /// Convert fallible handler service into error response.
+    fn error_layer(rtr: MethodRouter<(), BoxError>) -> MethodRouter<(), Infallible> {
+        rtr.handle_error(default_error_handler)
+    }
+}
+
+/// Error handler for uxum-specific error types.
+pub async fn default_error_handler(err: BoxError) -> Response<Body> {
+    error!(error = err.to_string(), "error in handler");
+    if let Some(rate_err) = err.downcast_ref::<RateLimitError>().cloned() {
+        return rate_err.into_response();
+    }
+    if let Some(timeo_err) = err.downcast_ref::<TimeoutError>().cloned() {
+        return timeo_err.into_response();
+    }
+    problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
+        .with_type(errors::TAG_UXUM_ERROR)
+        .with_title(err.to_string())
+        .into_response()
 }
 
 /// Standard application behavior, used by default.

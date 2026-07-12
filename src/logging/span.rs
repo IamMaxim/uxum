@@ -1,11 +1,19 @@
 //! Custom span generators for request tracing.
 
-use axum::{body::Body, http::Request};
+use std::net::SocketAddr;
+
+use axum::{
+    body::Body,
+    extract::{ConnectInfo, MatchedPath, OriginalUri},
+    http::{Request, Version, header},
+};
 use opentelemetry::{propagation::Extractor, trace::TraceContextExt};
 use tower_http::{request_id::RequestId, trace::MakeSpan};
 use tracing::{Level, Span, field::Empty};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_record_hierarchical::SpanExt;
+
+use crate::layers::ext::ListenerInfo;
 
 const DEFAULT_MESSAGE_LEVEL: Level = Level::DEBUG;
 
@@ -56,13 +64,26 @@ impl CustomMakeSpan {
 impl MakeSpan<Body> for CustomMakeSpan {
     fn make_span(&mut self, request: &Request<Body>) -> Span {
         // TODO: don't send trace/span IDs as redundant attributes in otel traces.
-        let x_request_id = request
-            .extensions()
+        let ext = request.extensions();
+        let x_request_id = ext
             .get::<RequestId>()
             .and_then(|id| id.header_value().to_str().ok());
         let parent_context = opentelemetry::global::get_text_map_propagator(|prop| {
             prop.extract(&HeaderExtractor(request.headers()))
         });
+        // TODO: fill `client.address` using X-Forwarded-For with ConnectInfo as a fallback.
+        let url = ext
+            .get::<OriginalUri>()
+            .map(|ou| &ou.0)
+            .unwrap_or_else(|| request.uri());
+        let headers = request.headers();
+        let matched = ext.get::<MatchedPath>();
+        let conn = ext.get::<ConnectInfo<SocketAddr>>();
+        let li = ext.get::<ListenerInfo>();
+        let user_agent = headers
+            .get(header::USER_AGENT)
+            .and_then(|hv| hv.to_str().ok());
+
         // This ugly macro is needed, unfortunately, because `tracing::span!`
         // required the level argument to be static. Meaning we can't just pass
         // `self.level`.
@@ -78,8 +99,17 @@ impl MakeSpan<Body> for CustomMakeSpan {
                         "user.name" = Empty,
                         "x_request_id" = x_request_id,
                         "http.request.method" = %request.method(),
-                        "url.full" = %request.uri(),
-                        "http.version" = ?request.version(),
+                        "url.path" = url.path(),
+                        "url.scheme" = li.map(|i| i.protocol.as_scheme()),
+                        "url.query" = url.query(),
+                        "server.address" = li.map(|i| i.local_addr.ip().to_string()),
+                        "server.port" = li.map(|i| i.local_addr.port()),
+                        "network.peer.address" = conn.map(|c| c.ip().to_string()),
+                        "network.peer.port" = conn.map(|c| c.port()),
+                        "network.transport" = li.map(|i| i.protocol.as_transport()),
+                        "network.protocol.version" = format_version(request.version()),
+                        "http.route" = matched.map(|m| m.as_str()),
+                        "user_agent.original" = user_agent,
                         "http.request.headers" = ?request.headers(),
                     )
                 } else {
@@ -92,8 +122,17 @@ impl MakeSpan<Body> for CustomMakeSpan {
                         "user.name" = Empty,
                         "x_request_id" = x_request_id,
                         "http.request.method" = %request.method(),
-                        "url.full" = %request.uri(),
-                        "http.version" = ?request.version(),
+                        "url.path" = url.path(),
+                        "url.scheme" = li.map(|i| i.protocol.as_scheme()),
+                        "url.query" = url.query(),
+                        "server.address" = li.map(|i| i.local_addr.ip().to_string()),
+                        "server.port" = li.map(|i| i.local_addr.port()),
+                        "network.peer.address" = conn.map(|c| c.ip().to_string()),
+                        "network.peer.port" = conn.map(|c| c.port()),
+                        "network.transport" = li.map(|i| i.protocol.as_transport()),
+                        "network.protocol.version" = format_version(request.version()),
+                        "user_agent.original" = user_agent,
+                        "http.route" = matched.map(|m| m.as_str()),
                     )
                 }
             }
@@ -151,4 +190,20 @@ pub(crate) fn set_user_name(name: impl AsRef<str>) {
     let name = name.as_ref();
     let span = tracing::Span::current();
     span.record_hierarchical("user.name", name);
+}
+
+fn format_version(version: Version) -> &'static str {
+    if version == Version::HTTP_3 {
+        "3"
+    } else if version == Version::HTTP_2 {
+        "2"
+    } else if version == Version::HTTP_11 {
+        "1.1"
+    } else if version == Version::HTTP_10 {
+        "1.0"
+    } else if version == Version::HTTP_09 {
+        "0.9"
+    } else {
+        ""
+    }
 }

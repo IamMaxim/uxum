@@ -21,8 +21,7 @@ use tracing::{debug_span, info};
 
 use crate::{
     auth::{AuthExtractor, AuthLayer, AuthProvider},
-    behavior::{AppBehavior, StandardAppBehavior},
-    builder::app::error_handler,
+    behavior::{AppBehavior, StandardAppBehavior, default_error_handler},
     watchdog::{Watchdog, WatchdogConfig},
 };
 
@@ -110,7 +109,7 @@ impl ProbeConfig {
                     .route(&self.maintenance_off_path, routing::post(maintenance_off))
                     .layer(
                         ServiceBuilder::new()
-                            .layer(HandleErrorLayer::new(error_handler))
+                            .layer(HandleErrorLayer::new(default_error_handler))
                             .layer(AuthLayer::new(
                                 &["maintenance"],
                                 auth_provider,

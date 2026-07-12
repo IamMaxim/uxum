@@ -1,9 +1,10 @@
 //! Logging configuration via [`tracing`] crate.
 
+pub(crate) mod http;
 pub(crate) mod json;
 pub(crate) mod span;
 
-use std::{collections::BTreeMap, fs, io};
+use std::{collections::BTreeMap, fs, io, num::NonZeroUsize, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -17,10 +18,18 @@ use tracing_subscriber::{
     layer::{Layer, Layered, SubscriberExt},
     registry::Registry,
 };
+use url::Url;
 
 #[cfg(feature = "kafka")]
 use crate::kafka::{KafkaLogAppender, KafkaProducerConfig};
-use crate::logging::json::{ExtensibleJsonFormat, JsonKeyNames};
+use crate::{
+    http_client::HttpClientConfig,
+    logging::{
+        http::{HttpLogAppender, HttpLogAppenderError},
+        json::{ExtensibleJsonFormat, JsonKeyNames},
+    },
+    metrics::MetricsState,
+};
 
 type LoggingRegistry = Layered<Vec<Box<dyn Layer<Registry> + Send + Sync>>, Registry>;
 
@@ -36,6 +45,8 @@ pub enum LoggingError {
     #[cfg(feature = "kafka")]
     #[error("Error in Kafka log writer: {0}")]
     Kafka(#[from] rdkafka::error::KafkaError),
+    #[error("Error in HTTP log writer: {0}")]
+    Http(#[from] HttpLogAppenderError),
 }
 
 /// Logging configuration.
@@ -53,17 +64,18 @@ impl LoggingConfig {
     /// # Errors
     ///
     /// Returns `Err` if any of the subscribers cannot be initialized.
-    pub fn make_registry(&self) -> Result<(LoggingRegistry, Vec<WorkerGuard>), LoggingError> {
+    pub async fn make_registry(
+        &self,
+        metrics: Option<&MetricsState>,
+    ) -> Result<(LoggingRegistry, Vec<WorkerGuard>), LoggingError> {
         let num_subs = self.subscribers.len();
-        let (subs, buf_guards) = self.subscribers.iter().try_fold(
-            (Vec::with_capacity(num_subs), Vec::with_capacity(num_subs)),
-            |(mut acc_s, mut acc_g), sub_cfg| {
-                let (sub, guard) = sub_cfg.make_layer()?;
-                acc_s.push(sub);
-                acc_g.push(guard);
-                Ok::<_, LoggingError>((acc_s, acc_g))
-            },
-        )?;
+        let mut subs = Vec::with_capacity(num_subs);
+        let mut buf_guards = Vec::with_capacity(num_subs);
+        for sub_cfg in &self.subscribers {
+            let (sub, guard) = sub_cfg.make_layer(metrics).await?;
+            subs.push(sub);
+            buf_guards.push(guard);
+        }
         Ok((Registry::default().with(subs), buf_guards))
     }
 }
@@ -137,14 +149,18 @@ impl LoggingSubscriberConfig {
     }
 
     /// Make [`tracing_subscriber::Layer`] from subscriber configuration.
-    pub fn make_layer<T>(
+    pub async fn make_layer<T>(
         &self,
+        metrics: Option<&MetricsState>,
     ) -> Result<(Box<dyn Layer<T> + Send + Sync>, WorkerGuard), LoggingError>
     where
         T: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
     {
         let buf_builder = self.buffer.make_builder();
-        let (buf_writer, buf_guard) = self.output.make_writer(buf_builder)?;
+        let (buf_writer, buf_guard) = self
+            .output
+            .make_writer(&self.format, metrics, buf_builder)
+            .await?;
         let layer = fmt::layer()
             .with_writer(buf_writer)
             .with_ansi(self.color)
@@ -422,21 +438,25 @@ pub enum LoggingDestination {
     /// Output to standard error (stderr, fd 2).
     #[serde(alias = "stderr", alias = "err")]
     StdErr,
-    /// Output to file.
-    File(LoggingFileConfig),
-    /// Output to files in a directory with optional rotation.
+    /// Output to local file.
+    File(Box<LoggingFileConfig>),
+    /// Output to files in a local directory with optional rotation.
     #[serde(alias = "dir")]
-    Directory(LoggingDirectoryConfig),
+    Directory(Box<LoggingDirectoryConfig>),
     #[cfg(feature = "kafka")]
     /// Output to Apache Kafka topic.
     #[serde(alias = "kafka_topic", alias = "topic")]
     Kafka(Box<KafkaProducerConfig>),
+    /// Output to remote HTTP endpoint via batched requests.
+    Http(Box<LoggingHttpConfig>),
 }
 
 impl LoggingDestination {
     /// Make [`tracing_subscriber::fmt::writer::BoxMakeWriter`] from configuration.
-    pub fn make_writer(
+    pub async fn make_writer(
         &self,
+        format: &LoggingFormat,
+        metrics: Option<&MetricsState>,
         buf_builder: NonBlockingBuilder,
     ) -> Result<(BoxMakeWriter, WorkerGuard), LoggingError> {
         match self {
@@ -474,6 +494,11 @@ impl LoggingDestination {
             #[cfg(feature = "kafka")]
             Self::Kafka(kafka_cfg) => {
                 let appender = KafkaLogAppender::new(kafka_cfg)?;
+                let (wr, wg) = buf_builder.finish(appender);
+                Ok((BoxMakeWriter::new(wr), wg))
+            }
+            Self::Http(http_cfg) => {
+                let appender = HttpLogAppender::new(http_cfg, format, metrics).await?;
                 let (wr, wg) = buf_builder.finish(appender);
                 Ok((BoxMakeWriter::new(wr), wg))
             }
@@ -536,6 +561,90 @@ impl LoggingDirectoryConfig {
     #[allow(clippy::unnecessary_wraps)]
     fn default_suffix() -> Option<String> {
         Some("log".into())
+    }
+}
+
+/// Configuration of remote HTTP output.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct LoggingHttpConfig {
+    /// Name of HTTP client for use in traces, logs and metrics.
+    #[serde(default = "LoggingHttpConfig::default_http_client_name")]
+    pub http_client_name: String,
+    /// HTTP client configuration.
+    #[serde(default)]
+    pub http_client: HttpClientConfig,
+    /// URL to send aggregated logs to.
+    pub endpoint: Url,
+    /// HTTP method to use when calling [`Self::endpoint`].
+    #[serde(default)]
+    pub method: LoggingHttpMethod,
+    /// Size of queue supplying messages to HTTP log appender thread.
+    #[serde(default = "LoggingHttpConfig::default_queue")]
+    pub queue: NonZeroUsize,
+    /// Max count of log messages to batch together and send in a single request.
+    #[serde(default = "LoggingHttpConfig::default_max_batch_size")]
+    pub max_batch_size: NonZeroUsize,
+    /// Do not disable tracing spans and events inside HTTP log appender thread if true.
+    #[serde(default)]
+    pub debug: bool,
+    /// Return errors to the logger when internal queue is full or closed.
+    #[serde(default = "crate::util::default_true")]
+    pub back_pressure: bool,
+    /// Do not initiate new HTTP request on receiving flush operation.
+    ///
+    /// Note that [`mod@tracing_subscriber::fmt`] subsystem usually likes to send flushes
+    /// after every log message.
+    #[serde(default)]
+    pub ignore_flush: bool,
+    /// Enable optional periodic forced flush of accumulated logs.
+    #[serde(default, with = "humantime_serde")]
+    pub periodic_flush: Option<Duration>,
+}
+
+impl LoggingHttpConfig {
+    /// Default value for [`Self::http_client_name`].
+    #[must_use]
+    #[inline]
+    fn default_http_client_name() -> String {
+        String::from("logging")
+    }
+
+    /// Default value for [`Self::queue`].
+    #[must_use]
+    #[inline]
+    fn default_queue() -> NonZeroUsize {
+        // SAFETY: always succeeds.
+        NonZeroUsize::new(1024).unwrap()
+    }
+
+    /// Default value for [`Self::max_batch_size`].
+    #[must_use]
+    #[inline]
+    fn default_max_batch_size() -> NonZeroUsize {
+        // SAFETY: always succeeds.
+        NonZeroUsize::new(256).unwrap()
+    }
+}
+
+/// HTTP method to use when sending aggregated logs.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[non_exhaustive]
+#[serde(rename_all = "UPPERCASE")]
+pub enum LoggingHttpMethod {
+    #[default]
+    Post,
+    Put,
+    Patch,
+}
+
+impl From<LoggingHttpMethod> for ::http::Method {
+    fn from(value: LoggingHttpMethod) -> Self {
+        match value {
+            LoggingHttpMethod::Post => Self::POST,
+            LoggingHttpMethod::Put => Self::PUT,
+            LoggingHttpMethod::Patch => Self::PATCH,
+        }
     }
 }
 

@@ -48,11 +48,8 @@ use crate::{
     behavior::{AppBehavior, StandardAppBehavior},
     config::AppConfig,
     errors,
-    http_client::{HttpClientConfig, HttpClientError},
-    layers::{
-        ext::HandlerName, rate::RateLimitError, request_id::RecordRequestIdLayer,
-        timeout::TimeoutError,
-    },
+    http_client::HttpClientError,
+    layers::{ext::HandlerName, request_id::RecordRequestIdLayer},
     logging::span::CustomMakeSpan,
     metrics::{MetricsBuilder, MetricsError, MetricsState},
     state,
@@ -314,7 +311,7 @@ impl<B: AppBehavior> AppBuilder<B> {
         // Register handlers.
         for (path, handlers) in grouped {
             if let Some(method_rtr) = self.register_path(path, handlers) {
-                rtr = rtr.route(path, method_rtr.handle_error(error_handler));
+                rtr = rtr.route(path, B::error_layer(method_rtr));
             }
         }
 
@@ -392,20 +389,8 @@ impl<B: AppBehavior> AppBuilder<B> {
         &self,
         name: impl AsRef<str>,
     ) -> Result<reqwest_middleware::ClientWithMiddleware, AppBuilderError> {
-        let name = name.as_ref();
-        match self.config.http_clients.get(name).cloned() {
-            Some(mut cfg) => {
-                if let Some(app_name) = &self.config.app_name {
-                    cfg.with_app_name(app_name);
-                }
-                if let Some(app_version) = &self.config.app_version {
-                    cfg.with_app_version(app_version);
-                }
-                let metrics = self.metrics().map(|m| m.client_metrics(name));
-                cfg.to_client(metrics).await.map_err(Into::into)
-            }
-            None => Err(AppBuilderError::HttpClientAbsent(name.to_string())),
-        }
+        let metrics = self.metrics();
+        self.config.http_client(name, metrics).await
     }
 
     /// Same as [`Self::http_client`], but returns default client if there is no configuration
@@ -418,22 +403,8 @@ impl<B: AppBehavior> AppBuilder<B> {
         &self,
         name: impl AsRef<str>,
     ) -> Result<reqwest_middleware::ClientWithMiddleware, AppBuilderError> {
-        let name = name.as_ref();
-        match self.http_client(name).await {
-            Ok(client) => Ok(client),
-            Err(AppBuilderError::HttpClientAbsent(_)) => {
-                let mut cfg = HttpClientConfig::default();
-                if let Some(app_name) = &self.config.app_name {
-                    cfg.with_app_name(app_name);
-                }
-                if let Some(app_version) = &self.config.app_version {
-                    cfg.with_app_version(app_version);
-                }
-                let metrics = self.metrics().map(|m| m.client_metrics(name));
-                cfg.to_client(metrics).await.map_err(Into::into)
-            }
-            Err(err) => Err(err),
-        }
+        let metrics = self.metrics();
+        self.config.http_client_or_default(name, metrics).await
     }
 
     /// Wrap router in global [`tower`] layers.
@@ -578,21 +549,6 @@ impl<B: AppBehavior> AppBuilder<B> {
         self.grpc_services.add_service(svc);
         self
     }
-}
-
-/// Error handler for uxum-specific error types.
-pub(crate) async fn error_handler(err: BoxError) -> Response<Body> {
-    error!(error = err.to_string(), "error in handler");
-    if let Some(rate_err) = err.downcast_ref::<RateLimitError>().cloned() {
-        return rate_err.into_response();
-    }
-    if let Some(timeo_err) = err.downcast_ref::<TimeoutError>().cloned() {
-        return timeo_err.into_response();
-    }
-    problemdetails::new(StatusCode::INTERNAL_SERVER_ERROR)
-        .with_type(errors::TAG_UXUM_ERROR)
-        .with_title(err.to_string())
-        .into_response()
 }
 
 /// Error handler for when no handler is found by application router.

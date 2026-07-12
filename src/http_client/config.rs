@@ -15,7 +15,6 @@ use reqwest::{
 };
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
-use tokio::{fs::OpenOptions, io::AsyncReadExt};
 
 #[cfg(feature = "spiffe")]
 use crate::spiffe::SpiffeConfig;
@@ -25,7 +24,7 @@ use crate::{
         cb::HttpClientCircuitBreakerConfig, errors::HttpClientError, middleware::wrap_client,
     },
     metrics::ClientMetricsState,
-    util::OptVec,
+    util::{OptVec, fs::read_file},
 };
 
 /// HTTP client kind.
@@ -494,13 +493,7 @@ impl HttpClientRedirectPolicy {
 
 /// Load client X.509 identity from a local file.
 async fn load_identity(pem_file: &Path) -> Result<Identity, HttpClientError> {
-    let mut pem_buf = Vec::new();
-    OpenOptions::new()
-        .read(true)
-        .open(pem_file)
-        .await
-        .map_err(HttpClientError::identity_load)?
-        .read_to_end(&mut pem_buf)
+    let pem_buf = read_file(pem_file)
         .await
         .map_err(HttpClientError::identity_load)?;
     Identity::from_pem(&pem_buf).map_err(Into::into)

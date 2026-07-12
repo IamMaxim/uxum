@@ -34,6 +34,7 @@ mod signal;
 pub mod spiffe;
 pub mod state;
 mod telemetry;
+mod tls;
 mod tracing;
 mod util;
 mod watchdog;
@@ -43,7 +44,7 @@ pub use uxum_macros::handler;
 pub use self::{
     apidoc::{ApiDocBuilder, ApiDocError},
     auth::*,
-    behavior::{AppBehavior, StandardAppBehavior},
+    behavior::{AppBehavior, StandardAppBehavior, default_error_handler},
     builder::{
         app::{AppBuilder, AppBuilderError, HandlerExt},
         server::{
@@ -56,12 +57,12 @@ pub use self::{
     http_client::*,
     layers::{
         cors::CorsConfig,
-        ext::{Deadline, HandlerName},
+        ext::{Deadline, HandlerName, ListenerInfo, ListenerProtocol},
         rate::{HandlerRateLimitConfig, RateLimitError},
         request_id::CURRENT_REQUEST_ID,
         timeout::{CURRENT_DEADLINE, HandlerTimeoutConfig, TimeoutError},
     },
-    logging::LoggingConfig,
+    logging::{LoggingConfig, http::HttpLogAppender},
     metrics::{
         AdditionalMetricLabels, MetricsBuilder, MetricsError, MetricsState, text_exporter::*,
     },
@@ -70,6 +71,7 @@ pub use self::{
     response::{GetResponseSchemas, ResponseSchema},
     runtime::{RuntimeConfig, RuntimeError},
     signal::{SignalError, SignalStream},
+    tls::TlsConfig,
     tracing::TracingConfig,
     util::{OptVec, ResponseExtension},
     watchdog::WatchdogConfig,

@@ -456,6 +456,23 @@ mod hello {
         format!("Hello {}!", args.0)
     }
 
+    /// Greet someone using a name from a URL path element N times.
+    #[handler(
+        path = "/hello/{name}/{n}",
+        path_params(
+            name(description = "Name to greet", allow_empty = true),
+            n(description = "Number of times to greet", value_type = "i32")
+        )
+    )]
+    async fn name_from_path_n(state: State<HelloState>, args: Path<(String, i32)>) -> String {
+        state.log_name(&args.0.0);
+        let mut ret = String::new();
+        for _ in 0..args.0.1 {
+            ret.push_str(&format!("Hello {}! ", args.0.0));
+        }
+        ret
+    }
+
     pub mod grpc {
         pub mod advanced_server {
             tonic::include_proto!("advanced_server.v1");

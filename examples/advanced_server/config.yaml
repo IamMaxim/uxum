@@ -32,6 +32,34 @@ logging:
     - format: json
       level: DEBUG
       output:
+        type: http
+        http_client_name: logger
+        http_client:
+          kind: plain
+          verbose: true
+          pool_idle_timeout: 5m
+          pool_max_idle_per_host: 4
+        endpoint: http://localhost:8989/log
+        queue: 20
+        max_batch_size: 10
+        back_pressure: false
+        ignore_flush: true
+        periodic_flush: 10s
+      flatten_metadata: false
+      current_span: true
+      print:
+        target: true
+        file: true
+        line_number: true
+      key_names:
+        timestamp: '@timestamp'
+      static_fields:
+        env: dev
+        something: something
+        other: 42
+    - format: json
+      level: DEBUG
+      output:
         type: kafka
         topic: logtest
         brokers:
