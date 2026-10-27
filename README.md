@@ -807,6 +807,34 @@ Configuration section name: `metrics`.
 
 Configuration section name: `handlers`.
 
+#### Rate limiting
+
+`handlers.NAME.rate_limit` is either a single limit or a list of limits. A request has to pass
+all of them, in order. Tokens taken by one limit are not returned if a later one rejects the request,
+so list narrower limits (like per-user) before wider ones (like global).
+
+* `key`: what to count requests by. One of `global` (default), `peer_ip`, `smart_ip` or `user_id`.
+* `rps`: sustained requests per second.
+* `burst_rps`: maximum requests per second during burst.
+* `burst_duration`: duration of burst, used to calculate bucket size. Defaults to `1s`.
+* `overrides`: map of individual keys (user IDs or IP addresses) to their own `rps`, `burst_rps` and
+  `burst_duration`, used instead of defaults. `burst_duration` is inherited when not specified.
+  Not applicable to `global` limits.
+
+```yaml
+handlers:
+  upload:
+    rate_limit:
+      - key: user_id
+        rps: 5
+        burst_duration: 10s
+        overrides:
+          alice:
+            rps: 50
+      - key: global
+        rps: 100
+```
+
 ### API documentation
 
 Configuration section name: `api_doc`.

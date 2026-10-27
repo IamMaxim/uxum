@@ -3,6 +3,7 @@
 use std::{
     hash::Hash,
     net::{IpAddr, SocketAddr},
+    str::FromStr,
 };
 
 use axum::extract::ConnectInfo;
@@ -19,7 +20,7 @@ pub struct ExtractionError;
 
 /// Key extraction trait for use in various limiting layers.
 pub(crate) trait KeyExtractor {
-    type Key: Hash + Eq + Clone;
+    type Key: Hash + Eq + Clone + FromStr;
 
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, ExtractionError>;
 }
